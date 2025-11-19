@@ -109,7 +109,7 @@ class foggyzurichDataSet(data.Dataset):
         datafiles = self.files[index]
       
         image = Image.open(datafiles["img"]).convert('RGB')
-        label = m.imread(datafiles["label"])
+        label = Image.open(datafiles["label"])
         label = np.array(label, dtype=np.float32)
         name = datafiles["name"]
 
@@ -121,7 +121,8 @@ class foggyzurichDataSet(data.Dataset):
 
         classes = np.unique(label)
         lbl = label.astype(float)
-        lbl = m.imresize(label, (self.crop_size[1], self.crop_size[0]), "nearest", mode="F")
+        label_img = Image.fromarray(label.astype(np.uint8))
+        lbl = np.array(label_img.resize((self.crop_size[0], self.crop_size[1]), Image.NEAREST), dtype=np.float32)
         label = lbl.astype(int)
 
         size = image.shape
