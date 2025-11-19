@@ -11,12 +11,12 @@ DATA_LIST_PATH_EVAL = '/kaggle/input/fifo-dataset/foggy_zurich/Foggy_Zurich/list
 DATA_LIST_PATH_EVAL_FD ='./lists_file_names/leftImg8bit_testall_filenames.txt'
 DATA_LIST_PATH_EVAL_FDD ='./lists_file_names/leftImg8bit_testdense_filenames.txt' 
 DATA_DIR_EVAL = '/kaggle/input/fifo-dataset'
-DATA_DIR_EVAL_FD = '/kaggle/input/fifo-dataset/Foggy_Driving'
+DATA_DIR_EVAL_FD = '/kaggle/input/fifo-dataset'
 NUM_CLASSES = 19 
 RESTORE_FROM = 'no model'
 SNAPSHOT_DIR = f'./snapshots/FIFO'
 GT_DIR_FZ = '/kaggle/input/fifo-dataset/foggy_zurich/Foggy_Zurich'
-GT_DIR_FD = '/kaggle/input/fifo-dataset/Foggy_Driving'
+GT_DIR_FD = '/kaggle/input/fifo-dataset'
 GT_DIR_CLINDAU = '/kaggle/input/fifo-dataset/gtFine/gtFine'
 SET = 'val'
 
