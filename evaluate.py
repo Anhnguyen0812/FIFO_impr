@@ -48,7 +48,7 @@ def eval():
         model = rf_lw101(num_classes=args.num_classes)
 
     else:
-        restore = torch.load(args.restore_from)
+        restore = torch.load(args.restore_from, weights_only=False)
         model = rf_lw101(num_classes=args.num_classes)
 
         model.load_state_dict(restore['state_dict'])
