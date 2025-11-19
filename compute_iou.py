@@ -87,7 +87,7 @@ def compute_mIoU(gt_dir, pred_dir, devkit_dir, dataset):
     [-1, 255]]    
 
     num_classes = 19
-    name_classes = np.array(label, dtype=np.str)
+    name_classes = np.array(label, dtype=str)
 
     hist = np.zeros((num_classes, num_classes))
     if 'FZ' in dataset:
