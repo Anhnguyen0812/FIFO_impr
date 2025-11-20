@@ -16,17 +16,17 @@ class BoundaryHead(nn.Module):
     Uses features from layer0 (low-level) and layer1 (mid-level) for better edge detection.
     """
     
-    def __init__(self, in_channels_low=256, in_channels_mid=256, out_channels=1):
+    def __init__(self, in_channels_low=64, in_channels_mid=256, out_channels=1):
         super(BoundaryHead, self).__init__()
         
-        # Process low-level features (layer0) - rich in edge information
+        # Process low-level features (out1 from conv1) - rich in edge information
         self.low_conv = nn.Sequential(
             nn.Conv2d(in_channels_low, 128, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True)
         )
         
-        # Process mid-level features (layer1) - semantic context
+        # Process mid-level features (out2 from layer1) - semantic context
         self.mid_conv = nn.Sequential(
             nn.Conv2d(in_channels_mid, 128, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(128),

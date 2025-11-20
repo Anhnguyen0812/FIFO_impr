@@ -133,7 +133,8 @@ def main():
     FogPassFilter2.cuda(args.gpu)
 
     # Initialize Boundary Detection Head
-    BoundaryHead_model = BoundaryHead(in_channels_low=256, in_channels_mid=256, out_channels=1)
+    # out1 (conv1): 64 channels, out2 (layer1): 256 channels
+    BoundaryHead_model = BoundaryHead(in_channels_low=64, in_channels_mid=256, out_channels=1)
     BoundaryHead_model.train()
     BoundaryHead_model.cuda(args.gpu)
     BoundaryHead_optimizer = torch.optim.Adam(BoundaryHead_model.parameters(), lr=1e-3)
