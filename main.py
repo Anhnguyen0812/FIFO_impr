@@ -262,15 +262,22 @@ def main():
                     fog_factor_cw[batch_idx] = fogpassfilter(vector_cw_gram[batch_idx])
                     fog_factor_rf[batch_idx] = fogpassfilter(vector_rf_gram[batch_idx])                                                                                                                                                                                                
 
-                fog_factor_embeddings = torch.cat((torch.unsqueeze(fog_factor_sf[0],0),torch.unsqueeze(fog_factor_cw[0],0),torch.unsqueeze(fog_factor_rf[0],0),
-                                                   torch.unsqueeze(fog_factor_sf[1],0),torch.unsqueeze(fog_factor_cw[1],0),torch.unsqueeze(fog_factor_rf[1],0),
-                                                   torch.unsqueeze(fog_factor_sf[2],0),torch.unsqueeze(fog_factor_cw[2],0),torch.unsqueeze(fog_factor_rf[2],0),
-                                                   torch.unsqueeze(fog_factor_sf[3],0),torch.unsqueeze(fog_factor_cw[3],0),torch.unsqueeze(fog_factor_rf[3],0)),0)
-
+                # Dynamically build fog_factor_embeddings based on actual batch size
+                fog_factor_list = []
+                fog_factor_labels_list = []
+                for batch_idx in range(args.batch_size):
+                    fog_factor_list.extend([
+                        torch.unsqueeze(fog_factor_sf[batch_idx], 0),
+                        torch.unsqueeze(fog_factor_cw[batch_idx], 0),
+                        torch.unsqueeze(fog_factor_rf[batch_idx], 0)
+                    ])
+                    fog_factor_labels_list.extend([0, 1, 2])
+                
+                fog_factor_embeddings = torch.cat(fog_factor_list, 0)
                 fog_factor_embeddings_norm = torch.norm(fog_factor_embeddings, p=2, dim=1).detach()
                 size_fog_factor = fog_factor_embeddings.size()
-                fog_factor_embeddings = fog_factor_embeddings.div(fog_factor_embeddings_norm.expand(size_fog_factor[1],12).t())
-                fog_factor_labels = torch.LongTensor([0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2])
+                fog_factor_embeddings = fog_factor_embeddings.div(fog_factor_embeddings_norm.expand(size_fog_factor[1], args.batch_size * 3).t())
+                fog_factor_labels = torch.LongTensor(fog_factor_labels_list)
                 fog_pass_filter_loss = fogpassfilter_loss(fog_factor_embeddings,fog_factor_labels)
 
                 total_fpf_loss +=  fog_pass_filter_loss 
