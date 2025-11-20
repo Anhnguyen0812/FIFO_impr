@@ -16,7 +16,7 @@ NUM_CLASSES = 19
 RESTORE_FROM = 'no model'
 SNAPSHOT_DIR = f'./snapshots/FIFO'
 GT_DIR_FZ = '/kaggle/input/fifo-dataset/foggy_zurich/Foggy_Zurich'
-GT_DIR_FD = '/kaggle/input/foggy-driving/Foggy_Driving/gtFine'
+GT_DIR_FD = '/kaggle/input/foggy-driving/Foggy_Driving'
 GT_DIR_CLINDAU = '/kaggle/input/fifo-dataset/gtFine/gtFine'
 SET = 'val'
 
