@@ -165,8 +165,11 @@ def eval():
             output.save('%s/%s' % (save_dir_fdd, name))
             output_col.save('%s/%s_color.png' % (save_dir_fdd, name[:-4]))
         miou_fdd = compute_mIoU(args.gt_dir_fd, save_dir_fdd, args.devkit_dir_fd, 'FDD')
-    except FileNotFoundError:
-        print("Skipping Foggy Driving Dense evaluation (dataset not available)")
+    except FileNotFoundError as e:
+        print(f"Skipping Foggy Driving Dense evaluation (dataset not available): {e}")
+        miou_fdd = 0
+    except Exception as e:
+        print(f"Skipping Foggy Driving Dense evaluation (error): {e}")
         miou_fdd = 0
 
     # Test on Foggy Driving (if available)
@@ -215,8 +218,11 @@ def eval():
             output.save('%s/%s' % (save_dir_fd, name))
             output_col.save('%s/%s_color.png' % (save_dir_fd, name[:-4]))
         miou_fd = compute_mIoU(args.gt_dir_fd, save_dir_fd, args.devkit_dir_fd, 'FD')
-    except FileNotFoundError:
-        print("Skipping Foggy Driving evaluation (dataset not available)")
+    except FileNotFoundError as e:
+        print(f"Skipping Foggy Driving evaluation (dataset not available): {e}")
+        miou_fd = 0
+    except Exception as e:
+        print(f"Skipping Foggy Driving evaluation (error): {e}")
         miou_fd = 0
 
     # Test on Clear Lindau (if available)
