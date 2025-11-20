@@ -20,6 +20,7 @@ from datetime import datetime
 
 from model.refinenetlw import rf_lw101
 from model.fogpassfilter import FogPassFilter_conv1, FogPassFilter_res1
+from model.boundary_head import BoundaryHead, generate_boundary_label
 from utils.losses import CrossEntropy2d
 from dataset.paired_cityscapes import Pairedcityscapes
 from dataset.Foggy_Zurich import foggyzurichDataSet
@@ -131,10 +132,21 @@ def main():
     FogPassFilter2_optimizer = torch.optim.Adamax([p for p in FogPassFilter2.parameters() if p.requires_grad == True], lr=lr_fpf2)
     FogPassFilter2.cuda(args.gpu)
 
+    # Initialize Boundary Detection Head
+    BoundaryHead_model = BoundaryHead(in_channels_low=256, in_channels_mid=256, out_channels=1)
+    BoundaryHead_model.train()
+    BoundaryHead_model.cuda(args.gpu)
+    BoundaryHead_optimizer = torch.optim.Adam(BoundaryHead_model.parameters(), lr=1e-3)
+    
+    # Boundary loss (Binary Cross Entropy with Logits)
+    boundary_criterion = nn.BCEWithLogitsLoss()
+
     if args.restore_from_fogpass != RESTORE_FROM_fogpass:
         restore = torch.load(args.restore_from_fogpass, weights_only=False)
         FogPassFilter1.load_state_dict(restore['fogpass1_state_dict'])
         FogPassFilter2.load_state_dict(restore['fogpass2_state_dict'])
+        if 'boundary_state_dict' in restore:
+            BoundaryHead_model.load_state_dict(restore['boundary_state_dict'])
 
     fogpassfilter_loss = losses.ContrastiveLoss(
         pos_margin=0.1,
@@ -185,6 +197,7 @@ def main():
         loss_seg_sf_value = 0
         loss_fsm_value = 0
         loss_con_value = 0
+        loss_boundary_value = 0
 
         for opt in opts:
             opt.zero_grad()
@@ -400,7 +413,39 @@ def main():
 
                     loss_fsm += layer_fsm_loss / args.batch_size
 
-                loss = loss_seg_sf + loss_seg_cw + args.lambda_fsm*loss_fsm + args.lambda_con*loss_con  
+                # Boundary Detection Loss (Multi-task Learning)
+                loss_boundary = 0
+                BoundaryHead_model.train()
+                BoundaryHead_optimizer.zero_grad()
+                
+                # Generate boundary ground truth from segmentation labels
+                label_tensor = label.cuda(args.gpu)  # [B, H, W]
+                boundary_gt = generate_boundary_label(label_tensor)  # [B, 1, H, W]
+                
+                # Compute boundary loss for available features
+                if i_iter % 3 == 0:  # Both SF and CW available
+                    # Predict boundary for SF (foggy) images
+                    boundary_pred_sf = BoundaryHead_model(feature_sf0, feature_sf1)  # [B, 1, H/4, W/4]
+                    boundary_gt_resized = F.interpolate(boundary_gt, size=boundary_pred_sf.shape[2:], mode='bilinear', align_corners=True)
+                    loss_boundary_sf = boundary_criterion(boundary_pred_sf, boundary_gt_resized)
+                    
+                    # Predict boundary for CW (clear) images
+                    boundary_pred_cw = BoundaryHead_model(feature_cw0, feature_cw1)
+                    loss_boundary_cw = boundary_criterion(boundary_pred_cw, boundary_gt_resized)
+                    
+                    loss_boundary = (loss_boundary_sf + loss_boundary_cw) / 2
+                    
+                elif i_iter % 3 == 1:  # Only SF available
+                    boundary_pred_sf = BoundaryHead_model(feature_sf0, feature_sf1)
+                    boundary_gt_resized = F.interpolate(boundary_gt, size=boundary_pred_sf.shape[2:], mode='bilinear', align_corners=True)
+                    loss_boundary = boundary_criterion(boundary_pred_sf, boundary_gt_resized)
+                    
+                elif i_iter % 3 == 2:  # Only CW available
+                    boundary_pred_cw = BoundaryHead_model(feature_cw0, feature_cw1)
+                    boundary_gt_resized = F.interpolate(boundary_gt, size=boundary_pred_cw.shape[2:], mode='bilinear', align_corners=True)
+                    loss_boundary = boundary_criterion(boundary_pred_cw, boundary_gt_resized)
+
+                loss = loss_seg_sf + loss_seg_cw + args.lambda_fsm*loss_fsm + args.lambda_con*loss_con + args.lambda_boundary*loss_boundary
                 loss = loss / args.iter_size
                 loss.backward()
 
@@ -412,16 +457,22 @@ def main():
                     loss_fsm_value += loss_fsm.data.cpu().numpy() / args.iter_size
                 if loss_con != 0:
                     loss_con_value += loss_con.data.cpu().numpy() / args.iter_size
+                if loss_boundary != 0:
+                    loss_boundary_value += loss_boundary.data.cpu().numpy() / args.iter_size
 
             
                 wandb.log({"fsm loss": args.lambda_fsm*loss_fsm_value}, step=i_iter)
                 wandb.log({'SF_loss_seg': loss_seg_sf_value}, step=i_iter)
                 wandb.log({'CW_loss_seg': loss_seg_cw_value}, step=i_iter)
                 wandb.log({'consistency loss':args.lambda_con*loss_con_value}, step=i_iter)
+                wandb.log({'boundary loss':args.lambda_boundary*loss_boundary_value}, step=i_iter)
                 wandb.log({'total_loss': loss}, step=i_iter)           
 
                 for opt in opts:
                     opt.step()
+                
+                # Update boundary head
+                BoundaryHead_optimizer.step()
 
             FogPassFilter1_optimizer.step()
             FogPassFilter2_optimizer.step()
@@ -442,13 +493,14 @@ def main():
                 torch.save({'state_dict':model.state_dict(),
                 'fogpass1_state_dict':FogPassFilter1.state_dict(),
                 'fogpass2_state_dict':FogPassFilter2.state_dict(),
+                'boundary_state_dict':BoundaryHead_model.state_dict(),
                 'train_iter':i_iter,
                 'args':args
                 },osp.join(args.snapshot_dir, run_name)+'_fogpassfilter_'+str(i_iter)+'.pth')
 
         if i_iter % save_pred_every == 0 and i_iter != 0:
             print('taking snapshot ...')
-            print(f'Step {i_iter} - SF_loss: {loss_seg_sf_value:.4f}, CW_loss: {loss_seg_cw_value:.4f}, FSM_loss: {args.lambda_fsm*loss_fsm_value:.6f}, Consistency_loss: {args.lambda_con*loss_con_value:.6f}')
+            print(f'Step {i_iter} - SF_loss: {loss_seg_sf_value:.4f}, CW_loss: {loss_seg_cw_value:.4f}, FSM_loss: {args.lambda_fsm*loss_fsm_value:.6f}, Consistency_loss: {args.lambda_con*loss_con_value:.6f}, Boundary_loss: {args.lambda_boundary*loss_boundary_value:.4f}')
             save_dir = osp.join(f'./result/FIFO_model', args.file_name)
             
             if not os.path.exists(save_dir):
@@ -458,6 +510,7 @@ def main():
                 'state_dict':model.state_dict(),
                 'fogpass1_state_dict':FogPassFilter1.state_dict(),
                 'fogpass2_state_dict':FogPassFilter2.state_dict(),
+                'boundary_state_dict':BoundaryHead_model.state_dict(),
                 'train_iter':i_iter,
                 'args':args
             },osp.join(args.snapshot_dir, run_name)+'_FIFO'+str(i_iter)+'.pth')

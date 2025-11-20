@@ -54,6 +54,7 @@ def get_arguments():
     parser.add_argument("--set", type=str, default=SET)
     parser.add_argument("--lambda-fsm", type=float, default=0.0000001)
     parser.add_argument("--lambda-con", type=float, default=0.0001)
+    parser.add_argument("--lambda-boundary", type=float, default=0.1, help="Weight for boundary detection loss")
     parser.add_argument("--file-name", type=str, required=True)
     parser.add_argument("--modeltrain", type=str, required=True)
     return parser.parse_args()
