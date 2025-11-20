@@ -448,6 +448,7 @@ def main():
 
         if i_iter % save_pred_every == 0 and i_iter != 0:
             print('taking snapshot ...')
+            print(f'Step {i_iter} - SF_loss: {loss_seg_sf_value:.4f}, CW_loss: {loss_seg_cw_value:.4f}, FSM_loss: {args.lambda_fsm*loss_fsm_value:.6f}, Consistency_loss: {args.lambda_con*loss_con_value:.6f}')
             save_dir = osp.join(f'./result/FIFO_model', args.file_name)
             
             if not os.path.exists(save_dir):
