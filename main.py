@@ -195,6 +195,9 @@ def main():
 
     # Warmup for boundary loss to let segmentation stabilise first
     boundary_warmup_iters = 3000
+    
+    # Gradient accumulation counter
+    accum_step = 0
 
     for i_iter in tqdm(range(start_iter, args.num_steps)): 
         loss_seg_cw_value = 0
@@ -203,8 +206,14 @@ def main():
         loss_con_value = 0
         loss_boundary_value = 0
 
-        for opt in opts:
-            opt.zero_grad()
+        # Zero gradients only at the start of accumulation cycle
+        if accum_step == 0:
+            for opt in opts:
+                opt.zero_grad()
+            if i_iter >= boundary_warmup_iters:
+                BoundaryHead_optimizer.zero_grad()
+            FogPassFilter1_optimizer.zero_grad()
+            FogPassFilter2_optimizer.zero_grad()
 
         for sub_i in range(args.iter_size):
             # train fog-pass filtering module
@@ -302,7 +311,8 @@ def main():
                 wandb.log({f'layer{idx}/fpf loss': fog_pass_filter_loss}, step=i_iter)
                 wandb.log({f'layer{idx}/total fpf loss': total_fpf_loss}, step=i_iter)
 
-            total_fpf_loss.backward(retain_graph=False)
+            # Scale fog-pass filter loss by accumulation steps
+            (total_fpf_loss / args.accum_steps).backward(retain_graph=False)
 
 
             if args.modeltrain=='train':
@@ -426,7 +436,6 @@ def main():
                     boundary_weight = args.lambda_boundary
 
                     BoundaryHead_model.train()
-                    BoundaryHead_optimizer.zero_grad()
 
                     # Generate boundary ground truth from segmentation labels
                     label_tensor = label.cuda(args.gpu)  # [B, H, W]
@@ -440,7 +449,8 @@ def main():
                         loss_boundary = boundary_criterion(boundary_pred_cw, boundary_gt_resized)
 
                 loss = loss_seg_sf + loss_seg_cw + args.lambda_fsm*loss_fsm + args.lambda_con*loss_con + boundary_weight*loss_boundary
-                loss = loss / args.iter_size
+                # Scale loss by both iter_size and accumulation steps
+                loss = loss / (args.iter_size * args.accum_steps)
                 loss.backward()
 
                 if loss_seg_cw != 0:
@@ -460,13 +470,22 @@ def main():
                 wandb.log({'CW_loss_seg': loss_seg_cw_value}, step=i_iter)
                 wandb.log({'consistency loss':args.lambda_con*loss_con_value}, step=i_iter)
                 wandb.log({'boundary loss':boundary_weight*loss_boundary_value}, step=i_iter)
-                wandb.log({'total_loss': loss}, step=i_iter)           
-
+                wandb.log({'total_loss': loss}, step=i_iter)
+        
+        # Increment accumulation step counter
+        accum_step += 1
+        
+        # Only update weights after accumulating enough gradients
+        if accum_step >= args.accum_steps:
+            accum_step = 0  # Reset counter
+            
+            # Update all optimizers
+            if args.modeltrain == 'train':
                 for opt in opts:
                     opt.step()
                 
                 # Update boundary head only when it is active
-                if boundary_weight > 0.0:
+                if i_iter >= boundary_warmup_iters:
                     BoundaryHead_optimizer.step()
 
             FogPassFilter1_optimizer.step()

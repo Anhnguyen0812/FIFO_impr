@@ -55,6 +55,7 @@ def get_arguments():
     parser.add_argument("--lambda-fsm", type=float, default=0.0000001)
     parser.add_argument("--lambda-con", type=float, default=0.0001)
     parser.add_argument("--lambda-boundary", type=float, default=0.1, help="Weight for boundary detection loss")
+    parser.add_argument("--accum-steps", type=int, default=1, help="Number of gradient accumulation steps (effective batch size = batch_size * accum_steps)")
     parser.add_argument("--file-name", type=str, required=True)
     parser.add_argument("--modeltrain", type=str, required=True)
     return parser.parse_args()
