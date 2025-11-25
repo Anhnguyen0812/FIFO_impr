@@ -45,6 +45,26 @@ def gram_matrix(tensor):
     gram = torch.mm(tensor, tensor.t())
     return gram
 
+class FocalLoss(nn.Module):
+    """Focal Loss for handling class imbalance in boundary detection.
+    
+    Args:
+        alpha: Weighting factor in [0, 1] to balance positive/negative examples
+        gamma: Exponent of modulating factor (1 - p_t)^gamma
+    """
+    def __init__(self, alpha=0.25, gamma=2.0):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        
+    def forward(self, pred, target):
+        # pred: [B, 1, H, W] logits
+        # target: [B, 1, H, W] binary labels (0 or 1)
+        bce = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
+        pt = torch.exp(-bce)  # probability of correct class
+        focal = self.alpha * (1 - pt) ** self.gamma * bce
+        return focal.mean()
+
 def setup_optimisers_and_schedulers(args, model):
     optimisers = get_optimisers(
         model=model,
@@ -139,8 +159,8 @@ def main():
     BoundaryHead_model.cuda(args.gpu)
     BoundaryHead_optimizer = torch.optim.Adam(BoundaryHead_model.parameters(), lr=1e-3)
     
-    # Boundary loss (Binary Cross Entropy with Logits)
-    boundary_criterion = nn.BCEWithLogitsLoss()
+    # Boundary loss (Focal Loss for better handling of boundary/non-boundary imbalance)
+    boundary_criterion = FocalLoss(alpha=0.25, gamma=2.0)
 
     if args.restore_from_fogpass != RESTORE_FROM_fogpass:
         restore = torch.load(args.restore_from_fogpass, weights_only=False)
@@ -431,19 +451,51 @@ def main():
                 loss_boundary = 0
                 boundary_weight = 0.0
 
-                # Enable boundary loss only after warmup to avoid hurting early segmentation
-                if i_iter >= boundary_warmup_iters:
-                    boundary_weight = args.lambda_boundary
+                # Adaptive boundary weight schedule
+                if i_iter < boundary_warmup_iters:
+                    boundary_weight = 0.0  # Warmup: no boundary loss
+                elif i_iter < 6000:
+                    boundary_weight = args.lambda_boundary  # Initial weight (0.01)
+                else:
+                    boundary_weight = min(args.lambda_boundary * 3, 0.03)  # Increase after 6000 (up to 0.03)
 
+                # Enable boundary loss only after warmup
+                if i_iter >= boundary_warmup_iters:
                     BoundaryHead_model.train()
 
                     # Generate boundary ground truth from segmentation labels
                     label_tensor = label.cuda(args.gpu)  # [B, H, W]
                     boundary_gt = generate_boundary_label(label_tensor)  # [B, 1, H, W]
 
-                    # Compute boundary loss (only on clear images to reduce noise)
-                    if i_iter % 3 == 0 or i_iter % 3 == 2:
-                        # Use clear-weather features (CW) for boundary supervision
+                    # Compute boundary loss with both SF and CW features + consistency
+                    if i_iter % 3 == 0:
+                        # Both SF and CW available: supervise both + add consistency
+                        boundary_pred_cw = BoundaryHead_model(feature_cw0, feature_cw1)
+                        boundary_pred_sf = BoundaryHead_model(feature_sf0, feature_sf1)
+                        
+                        boundary_gt_resized = F.interpolate(boundary_gt, size=boundary_pred_cw.shape[2:], mode='bilinear', align_corners=True)
+                        
+                        # GT loss: CW (weight 1.0) + SF (weight 0.5)
+                        loss_boundary_cw = boundary_criterion(boundary_pred_cw, boundary_gt_resized)
+                        loss_boundary_sf = boundary_criterion(boundary_pred_sf, boundary_gt_resized)
+                        
+                        # Consistency loss: SF boundary should match CW boundary (use CW as teacher)
+                        loss_boundary_consistency = F.mse_loss(
+                            torch.sigmoid(boundary_pred_sf),
+                            torch.sigmoid(boundary_pred_cw).detach()
+                        )
+                        
+                        # Combined boundary loss
+                        loss_boundary = loss_boundary_cw + 0.5 * loss_boundary_sf + 0.3 * loss_boundary_consistency
+                        
+                    elif i_iter % 3 == 1:
+                        # Only SF available
+                        boundary_pred_sf = BoundaryHead_model(feature_sf0, feature_sf1)
+                        boundary_gt_resized = F.interpolate(boundary_gt, size=boundary_pred_sf.shape[2:], mode='bilinear', align_corners=True)
+                        loss_boundary = 0.5 * boundary_criterion(boundary_pred_sf, boundary_gt_resized)
+                        
+                    elif i_iter % 3 == 2:
+                        # Only CW available
                         boundary_pred_cw = BoundaryHead_model(feature_cw0, feature_cw1)
                         boundary_gt_resized = F.interpolate(boundary_gt, size=boundary_pred_cw.shape[2:], mode='bilinear', align_corners=True)
                         loss_boundary = boundary_criterion(boundary_pred_cw, boundary_gt_resized)
