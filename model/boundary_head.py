@@ -66,12 +66,11 @@ class BoundaryHead(nn.Module):
 
 
 def generate_boundary_label(seg_label, kernel_size=3):
-    """
-    Generate boundary labels from segmentation ground truth masks.
-    
-    Uses morphological operations to find object boundaries.
-    This should be called on GT labels, NOT on foggy input images!
-    
+    """Generate thin boundary labels from segmentation GT.
+
+    Uses a simple morphological gradient and then thins the boundary
+    to reduce its width, so the auxiliary task is less dominant.
+
     Args:
         seg_label: [B, H, W] segmentation ground truth (int labels)
         kernel_size: size of dilation/erosion kernel (default 3)
@@ -80,30 +79,37 @@ def generate_boundary_label(seg_label, kernel_size=3):
     """
     device = seg_label.device
     B, H, W = seg_label.shape
-    
+
     boundary_labels = []
-    
+
     for i in range(B):
         label = seg_label[i]  # [H, W]
-        
+
         # Convert to float for morphological operations
         label_float = label.float().unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
-        
-        # Create kernel for dilation/erosion
-        kernel = torch.ones(1, 1, kernel_size, kernel_size, device=device)
-        
-        # Dilation
-        dilated = F.max_pool2d(label_float, kernel_size, stride=1, padding=kernel_size//2)
-        
-        # Erosion (approximated by -max_pool(-x))
-        eroded = -F.max_pool2d(-label_float, kernel_size, stride=1, padding=kernel_size//2)
-        
-        # Boundary = dilated - eroded (morphological gradient)
+
+        # Dilation / erosion
+        dilated = F.max_pool2d(label_float, kernel_size, stride=1, padding=kernel_size // 2)
+        eroded = -F.max_pool2d(-label_float, kernel_size, stride=1, padding=kernel_size // 2)
+
+        # Initial (thick) boundary mask
         boundary = (dilated - eroded) > 0
-        boundary = boundary.float()
-        
-        boundary_labels.append(boundary)
-    
+
+        # Thin boundary: keep only pixels that differ from neighbors
+        # center vs 4-neighborhood
+        center = label_float
+        nb_top = F.pad(center[:, :, :-1, :], (0, 0, 1, 0), mode="replicate")
+        nb_bottom = F.pad(center[:, :, 1:, :], (0, 0, 0, 1), mode="replicate")
+        nb_left = F.pad(center[:, :, :, :-1], (1, 0, 0, 0), mode="replicate")
+        nb_right = F.pad(center[:, :, :, 1:], (0, 1, 0, 0), mode="replicate")
+
+        diff_nb = (center != nb_top) | (center != nb_bottom) | (center != nb_left) | (center != nb_right)
+
+        # Final boundary = intersection of thick boundary and neighbor-difference mask
+        boundary_thin = (boundary & diff_nb).float()
+
+        boundary_labels.append(boundary_thin)
+
     boundary_labels = torch.cat(boundary_labels, dim=0)  # [B, 1, H, W]
-    
+
     return boundary_labels

@@ -193,6 +193,9 @@ def main():
     m = nn.Softmax(dim=1)
     log_m = nn.LogSoftmax(dim=1)    
 
+    # Warmup for boundary loss to let segmentation stabilise first
+    boundary_warmup_iters = 3000
+
     for i_iter in tqdm(range(start_iter, args.num_steps)): 
         loss_seg_cw_value = 0
         loss_seg_sf_value = 0
@@ -416,37 +419,27 @@ def main():
 
                 # Boundary Detection Loss (Multi-task Learning)
                 loss_boundary = 0
-                BoundaryHead_model.train()
-                BoundaryHead_optimizer.zero_grad()
-                
-                # Generate boundary ground truth from segmentation labels
-                label_tensor = label.cuda(args.gpu)  # [B, H, W]
-                boundary_gt = generate_boundary_label(label_tensor)  # [B, 1, H, W]
-                
-                # Compute boundary loss for available features
-                if i_iter % 3 == 0:  # Both SF and CW available
-                    # Predict boundary for SF (foggy) images
-                    boundary_pred_sf = BoundaryHead_model(feature_sf0, feature_sf1)  # [B, 1, H/4, W/4]
-                    boundary_gt_resized = F.interpolate(boundary_gt, size=boundary_pred_sf.shape[2:], mode='bilinear', align_corners=True)
-                    loss_boundary_sf = boundary_criterion(boundary_pred_sf, boundary_gt_resized)
-                    
-                    # Predict boundary for CW (clear) images
-                    boundary_pred_cw = BoundaryHead_model(feature_cw0, feature_cw1)
-                    loss_boundary_cw = boundary_criterion(boundary_pred_cw, boundary_gt_resized)
-                    
-                    loss_boundary = (loss_boundary_sf + loss_boundary_cw) / 2
-                    
-                elif i_iter % 3 == 1:  # Only SF available
-                    boundary_pred_sf = BoundaryHead_model(feature_sf0, feature_sf1)
-                    boundary_gt_resized = F.interpolate(boundary_gt, size=boundary_pred_sf.shape[2:], mode='bilinear', align_corners=True)
-                    loss_boundary = boundary_criterion(boundary_pred_sf, boundary_gt_resized)
-                    
-                elif i_iter % 3 == 2:  # Only CW available
-                    boundary_pred_cw = BoundaryHead_model(feature_cw0, feature_cw1)
-                    boundary_gt_resized = F.interpolate(boundary_gt, size=boundary_pred_cw.shape[2:], mode='bilinear', align_corners=True)
-                    loss_boundary = boundary_criterion(boundary_pred_cw, boundary_gt_resized)
+                boundary_weight = 0.0
 
-                loss = loss_seg_sf + loss_seg_cw + args.lambda_fsm*loss_fsm + args.lambda_con*loss_con + args.lambda_boundary*loss_boundary
+                # Enable boundary loss only after warmup to avoid hurting early segmentation
+                if i_iter >= boundary_warmup_iters:
+                    boundary_weight = args.lambda_boundary
+
+                    BoundaryHead_model.train()
+                    BoundaryHead_optimizer.zero_grad()
+
+                    # Generate boundary ground truth from segmentation labels
+                    label_tensor = label.cuda(args.gpu)  # [B, H, W]
+                    boundary_gt = generate_boundary_label(label_tensor)  # [B, 1, H, W]
+
+                    # Compute boundary loss (only on clear images to reduce noise)
+                    if i_iter % 3 == 0 or i_iter % 3 == 2:
+                        # Use clear-weather features (CW) for boundary supervision
+                        boundary_pred_cw = BoundaryHead_model(feature_cw0, feature_cw1)
+                        boundary_gt_resized = F.interpolate(boundary_gt, size=boundary_pred_cw.shape[2:], mode='bilinear', align_corners=True)
+                        loss_boundary = boundary_criterion(boundary_pred_cw, boundary_gt_resized)
+
+                loss = loss_seg_sf + loss_seg_cw + args.lambda_fsm*loss_fsm + args.lambda_con*loss_con + boundary_weight*loss_boundary
                 loss = loss / args.iter_size
                 loss.backward()
 
@@ -466,14 +459,15 @@ def main():
                 wandb.log({'SF_loss_seg': loss_seg_sf_value}, step=i_iter)
                 wandb.log({'CW_loss_seg': loss_seg_cw_value}, step=i_iter)
                 wandb.log({'consistency loss':args.lambda_con*loss_con_value}, step=i_iter)
-                wandb.log({'boundary loss':args.lambda_boundary*loss_boundary_value}, step=i_iter)
+                wandb.log({'boundary loss':boundary_weight*loss_boundary_value}, step=i_iter)
                 wandb.log({'total_loss': loss}, step=i_iter)           
 
                 for opt in opts:
                     opt.step()
                 
-                # Update boundary head
-                BoundaryHead_optimizer.step()
+                # Update boundary head only when it is active
+                if boundary_weight > 0.0:
+                    BoundaryHead_optimizer.step()
 
             FogPassFilter1_optimizer.step()
             FogPassFilter2_optimizer.step()
