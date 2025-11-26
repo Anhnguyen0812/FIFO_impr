@@ -17,6 +17,8 @@ from tqdm import tqdm
 from PIL import Image
 from packaging import version
 from datetime import datetime
+import matplotlib.pyplot as plt
+import subprocess
 
 from model.refinenetlw import rf_lw101
 from model.fogpassfilter import FogPassFilter_conv1, FogPassFilter_res1
@@ -218,6 +220,9 @@ def main():
     
     # Gradient accumulation counter
     accum_step = 0
+
+    # Loss history for plotting
+    loss_history = {'total': [], 'seg_sf': [], 'seg_cw': [], 'fsm': [], 'con': [], 'boundary': []}
 
     for i_iter in tqdm(range(start_iter, args.num_steps)): 
         loss_seg_cw_value = 0
@@ -523,6 +528,14 @@ def main():
                 wandb.log({'consistency loss':args.lambda_con*loss_con_value}, step=i_iter)
                 wandb.log({'boundary loss':boundary_weight*loss_boundary_value}, step=i_iter)
                 wandb.log({'total_loss': loss}, step=i_iter)
+
+                # Collect losses for plotting
+                loss_history['total'].append(loss.item() if hasattr(loss, 'item') else loss)
+                loss_history['seg_sf'].append(loss_seg_sf_value)
+                loss_history['seg_cw'].append(loss_seg_cw_value)
+                loss_history['fsm'].append(args.lambda_fsm*loss_fsm_value)
+                loss_history['con'].append(args.lambda_con*loss_con_value)
+                loss_history['boundary'].append(boundary_weight*loss_boundary_value)
         
         # Increment accumulation step counter
         accum_step += 1
@@ -566,7 +579,42 @@ def main():
 
         if i_iter % save_pred_every == 0 and i_iter != 0:
             print('taking snapshot ...')
-            print(f'Step {i_iter} - SF_loss: {loss_seg_sf_value:.4f}, CW_loss: {loss_seg_cw_value:.4f}, FSM_loss: {args.lambda_fsm*loss_fsm_value:.6f}, Consistency_loss: {args.lambda_con*loss_con_value:.6f}, Boundary_loss: {args.lambda_boundary*loss_boundary_value:.4f}')
+            # Compute additional metrics
+            enc_lr = opts[0].param_groups[0]['lr'] if opts else 0
+            dec_lr = opts[1].param_groups[0]['lr'] if len(opts) > 1 else 0
+            grad_norm = 0
+            if model.parameters():
+                grad_norm = torch.norm(torch.stack([torch.norm(p.grad.detach()) for p in model.parameters() if p.grad is not None]), 2).item() if any(p.grad is not None for p in model.parameters()) else 0
+            memory_mb = torch.cuda.memory_allocated(args.gpu) / 1e6 if torch.cuda.is_available() else 0
+            
+            print(f'Step {i_iter} - SF_loss: {loss_seg_sf_value:.4f}, CW_loss: {loss_seg_cw_value:.4f}, FSM_loss: {args.lambda_fsm*loss_fsm_value:.6f}, Consistency_loss: {args.lambda_con*loss_con_value:.6f}, Boundary_loss: {boundary_weight*loss_boundary_value:.4f}')
+            print(f'LR: Enc {enc_lr:.6f}, Dec {dec_lr:.6f} | Grad Norm: {grad_norm:.4f} | Memory: {memory_mb:.1f} MB')
+            
+            # Plot losses
+            plt.figure(figsize=(12, 8))
+            steps = list(range(len(loss_history['total'])))
+            plt.subplot(2, 3, 1)
+            plt.plot(steps, loss_history['total'], label='Total Loss')
+            plt.title('Total Loss')
+            plt.subplot(2, 3, 2)
+            plt.plot(steps, loss_history['seg_sf'], label='SF Seg Loss')
+            plt.title('SF Segmentation Loss')
+            plt.subplot(2, 3, 3)
+            plt.plot(steps, loss_history['seg_cw'], label='CW Seg Loss')
+            plt.title('CW Segmentation Loss')
+            plt.subplot(2, 3, 4)
+            plt.plot(steps, loss_history['fsm'], label='FSM Loss')
+            plt.title('FSM Loss')
+            plt.subplot(2, 3, 5)
+            plt.plot(steps, loss_history['con'], label='Consistency Loss')
+            plt.title('Consistency Loss')
+            plt.subplot(2, 3, 6)
+            plt.plot(steps, loss_history['boundary'], label='Boundary Loss')
+            plt.title('Boundary Loss')
+            plt.tight_layout()
+            plt.savefig(f'./result/loss_plots_step_{i_iter}.png')
+            plt.close()
+            
             save_dir = osp.join(f'./result/FIFO_model', args.file_name)
             
             if not os.path.exists(save_dir):
@@ -580,6 +628,25 @@ def main():
                 'train_iter':i_iter,
                 'args':args
             },osp.join(args.snapshot_dir, run_name)+'_FIFO'+str(i_iter)+'.pth')
+            
+            # Run evaluation every 2000 steps
+            if i_iter % 2000 == 0:
+                print('Running evaluation...')
+                eval_cmd = [
+                    'python', 'evaluate.py',
+                    '--restore-from', osp.join(args.snapshot_dir, run_name)+'_FIFO'+str(i_iter)+'.pth',
+                    '--gpu', str(args.gpu),
+                    '--file-name', args.file_name
+                ]
+                try:
+                    result = subprocess.run(eval_cmd, capture_output=True, text=True, cwd=os.getcwd())
+                    print('Evaluation output:')
+                    print(result.stdout)
+                    if result.stderr:
+                        print('Evaluation errors:')
+                        print(result.stderr)
+                except Exception as e:
+                    print(f'Error running evaluation: {e}')
             
 if __name__ == '__main__':
     main()
