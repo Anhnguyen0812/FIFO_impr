@@ -94,8 +94,8 @@ class foggyzurichDataSet(data.Dataset):
         self.class_map = dict(zip(self.valid_classes, range(19)))
 
         for name in self.img_ids:
-            img_file = osp.join(self.root, "foggy_zurich/Foggy_Zurich/%s" % (name))
-            label_file = osp.join(self.root, "foggy_zurich/Foggy_Zurich/%s" % ("gt_labelTrainIds/"+name[4:]))
+            img_file = osp.join(self.root, "Foggy_Zurich/%s" % (name))
+            label_file = osp.join(self.root, "Foggy_Zurich/%s" % ("gt_labelTrainIds/"+name[4:]))
             self.files.append({
                 "img": img_file,
                 "label": label_file,
