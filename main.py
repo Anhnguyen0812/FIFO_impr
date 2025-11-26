@@ -612,6 +612,9 @@ def main():
             plt.plot(steps, loss_history['boundary'], label='Boundary Loss')
             plt.title('Boundary Loss')
             plt.tight_layout()
+            # Ensure './result' directory exists
+            if not os.path.exists('./result'):
+                os.makedirs('./result')
             plt.savefig(f'./result/loss_plots_step_{i_iter}.png')
             plt.close()
             
