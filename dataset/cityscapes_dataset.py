@@ -25,7 +25,7 @@ class cityscapesDataSet(data.Dataset):
         self.files = []
         self.set = set
         for name in self.img_ids:
-            img_file = osp.join(self.root, "Cityscapes/leftImg8bit/%s/%s" % (self.set, name))
+            img_file = osp.join(self.root, "Cityscapes/leftImg8bit/leftImg8bit/%s/%s" % (self.set, name))
             self.files.append({
                 "img": img_file,
                 "name": name
