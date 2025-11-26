@@ -2,39 +2,29 @@ import argparse
 import os
 import numpy as np
 
-# --- CẤU HÌNH PATH ---
-DATA_ROOT = '/root/data'  # Thay cho /kaggle/input
-CODE_ROOT = '.'           # Thay cho /kaggle/working/FIFO_impr
-
 IMG_MEAN = np.array((104.00698793, 116.66876762, 122.67891434), dtype=np.float32)
 BETA = 0.005
 BATCH_SIZE = 4
 ITER_SIZE = 1
 NUM_WORKERS = 4
-
-# 1. Dataset Paths (Trỏ vào folder con đã chuẩn hóa)
-DATA_DIRECTORY = os.path.join(DATA_ROOT, 'Cityscapes')
-DATA_DIRECTORY_CWSF = os.path.join(DATA_ROOT, 'Foggy_Cityscapes')
-DATA_DIR_RF = DATA_ROOT # Foggy Zurich root
-
-# 2. List Paths (Nằm trong thư mục code)
-DATA_LIST_PATH = f'{CODE_ROOT}/dataset/cityscapes_list/train_foggy_{BETA}.txt'
-DATA_CITY_PATH = f'{CODE_ROOT}/dataset/cityscapes_list/clear_lindau.txt'
-DATA_LIST_PATH_CWSF = f'{CODE_ROOT}/dataset/cityscapes_list/train_origin.txt'
-
-# 3. Foggy Zurich List (Nằm trong data)
-DATA_LIST_RF = os.path.join(DATA_ROOT, 'Foggy_Zurich/lists_file_names/RGB_light_filenames.txt')
-
+DATA_DIRECTORY ='/root/data'
+DATA_LIST_PATH = f'/workspace/FIFO_impr/dataset/cityscapes_list/train_foggy_{BETA}.txt'
+DATA_CITY_PATH = '/workspace/FIFO_impr/dataset/cityscapes_list/clear_lindau.txt'
 INPUT_SIZE = '2048,1024'
+DATA_DIRECTORY_CWSF = '/root/data'
+DATA_LIST_PATH_CWSF = '/workspace/FIFO_impr/dataset/cityscapes_list/train_origin.txt'
+DATA_LIST_RF = '/root/data/foggy_zurich/Foggy_Zurich/lists_file_names/RGB_light_filenames.txt'
+DATA_DIR = '/root/data'
 INPUT_SIZE_RF = '1920,1080'
 NUM_CLASSES = 19 
 NUM_STEPS = 100000 
-NUM_STEPS_STOP = 60000 
+NUM_STEPS_STOP = 60000  # early stopping
 RANDOM_SEED = 1234
 RESTORE_FROM = 'no_model'
 RESTORE_FROM_fogpass = 'no_model'
 SAVE_PRED_EVERY = 100
-SNAPSHOT_DIR = f'{CODE_ROOT}/snapshots/FIFO_model' 
+SNAPSHOT_DIR = f'./snapshots/FIFO_model'
+
 SET = 'train'
 
 def get_arguments():

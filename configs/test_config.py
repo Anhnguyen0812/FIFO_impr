@@ -2,37 +2,22 @@
 import argparse
 import os
 import numpy as np
-
-# --- CẤU HÌNH PATH ---
-DATA_ROOT = '/root/data'  # Thay cho /kaggle/input
-CODE_ROOT = '.'           # Thay cho /kaggle/working/FIFO_impr
-
 IMG_MEAN = np.array((104.00698793, 116.66876762, 122.67891434), dtype=np.float32)
 MODEL = 'RefineNetNew'
-
-# 1. Dataset Paths
-DATA_DIRECTORY = os.path.join(DATA_ROOT, 'Cityscapes')
-DATA_DIRECTORY_CITY = os.path.join(DATA_ROOT, 'Cityscapes')
-DATA_DIR_EVAL = DATA_ROOT # Root chứa Foggy Zurich
-DATA_DIR_EVAL_FD = os.path.join(DATA_ROOT, 'Foggy_Driving')
-
-# 2. List Paths (File list nằm trong code)
-DATA_CITY_PATH = f'{CODE_ROOT}/dataset/cityscapes_list/clear_lindau.txt'
-DATA_LIST_PATH_EVAL_FD = f'{CODE_ROOT}/lists_file_names/leftImg8bit_testall_filenames.txt'
-DATA_LIST_PATH_EVAL_FDD = f'{CODE_ROOT}/lists_file_names/leftImg8bit_testdense_filenames.txt'
-
-# List FZ nằm trong data (đường dẫn chuẩn sau khi giải nén)
-DATA_LIST_PATH_EVAL = os.path.join(DATA_ROOT, 'Foggy_Zurich/lists_file_names/RGB_testv2_filenames.txt')
-
-# 3. Ground Truth Directories
-GT_DIR_FZ = os.path.join(DATA_ROOT, 'Foggy_Zurich')
-GT_DIR_FD = os.path.join(DATA_ROOT, 'Foggy_Driving')
-# GT Cityscapes thường nằm trong folder gtFine/gtFine
-GT_DIR_CLINDAU = os.path.join(DATA_ROOT, 'Cityscapes/gtFine/gtFine')
-
+DATA_DIRECTORY ='/root/data'
+DATA_CITY_PATH = '/workspace/FIFO_impr/dataset/cityscapes_list/clear_lindau.txt'
+DATA_DIRECTORY_CITY = '/root/data'
+DATA_LIST_PATH_EVAL = '/root/data/Foggy_Zurich/lists_file_names/RGB_testv2_filenames.txt'
+DATA_LIST_PATH_EVAL_FD ='/workspace/FIFO_impr/lists_file_names/leftImg8bit_testall_filenames.txt'
+DATA_LIST_PATH_EVAL_FDD ='/workspace/FIFO_impr/lists_file_names/leftImg8bit_testdense_filenames.txt' 
+DATA_DIR_EVAL = '/root/data'
+DATA_DIR_EVAL_FD = '/root/data/Foggy_Driving'
 NUM_CLASSES = 19 
 RESTORE_FROM = 'no model'
-SNAPSHOT_DIR = f'{CODE_ROOT}/snapshots/FIFO'
+SNAPSHOT_DIR = f'./snapshots/FIFO'
+GT_DIR_FZ = '/root/data/Foggy_Zurich'
+GT_DIR_FD = '/root/data/Foggy_Driving'
+GT_DIR_CLINDAU = '/root/data/gtFine/gtFine'
 SET = 'val'
 
 MODEL = 'RefineNetNew'
@@ -56,7 +41,7 @@ def get_arguments():
     parser.add_argument("--gt-dir-fz", type=str, default=GT_DIR_FZ)
     parser.add_argument("--gt-dir-fd", type=str, default=GT_DIR_FD)
     parser.add_argument("--gt-dir-clindau", type=str, default=GT_DIR_CLINDAU)
-    parser.add_argument("--devkit-dir-fz", default='/kaggle/input/fifo-dataset/foggy_zurich/Foggy_Zurich/lists_file_names') 
-    parser.add_argument("--devkit-dir-fd", default='/kaggle/working/FIFO_impr/lists_file_names') 
-    parser.add_argument("--devkit-dir-clindau", default='/kaggle/working/FIFO_impr/dataset/cityscapes_list')
+    parser.add_argument("--devkit-dir-fz", default='/root/data/foggy_zurich/Foggy_Zurich/lists_file_names') 
+    parser.add_argument("--devkit-dir-fd", default='/workspace/FIFO_impr/FIFO_impr/lists_file_names') 
+    parser.add_argument("--devkit-dir-clindau", default='/workspace/FIFO_impr/FIFO_impr/dataset/cityscapes_list')
     return parser.parse_args()
