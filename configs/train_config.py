@@ -42,7 +42,7 @@ def get_arguments():
     parser.add_argument("--input-size-rf", type=str, default=INPUT_SIZE_RF)
     parser.add_argument("--data-dir-cwsf", type=str, default=DATA_DIRECTORY_CWSF)
     parser.add_argument("--data-list-cwsf", type=str, default=DATA_LIST_PATH_CWSF)
-    parser.add_argument("--data-dir-rf", type=str, default=DATA_DIR_RF)
+    parser.add_argument("--data-dir-rf", type=str, default=DATA_DIR)
     parser.add_argument("--num-classes", type=int, default=NUM_CLASSES)
     parser.add_argument("--num-steps", type=int, default=NUM_STEPS)
     parser.add_argument("--num-steps-stop", type=int, default=NUM_STEPS_STOP)
