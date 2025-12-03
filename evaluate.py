@@ -19,12 +19,17 @@ warnings.filterwarnings("ignore")
 from transformers import SegformerForSemanticSegmentation
 from compute_iou import compute_mIoU
 from configs.test_config import get_arguments
-from dataset.cityscapes_dataset import cityscapesDataSet
-from dataset.Foggy_Zurich_test import foggyzurichDataSet
-from dataset.foggy_driving import foggydrivingDataSet
+from dataset.segformer_datasets import (
+    SegformerCityscapesDataSet,
+    SegformerFoggyZurichDataSet,
+    SegformerFoggyDrivingDataSet
+)
 
 RESTORE_FROM = 'without_pretraining'
-IMG_MEAN = np.array((104.00698793, 116.66876762, 122.67891434), dtype=np.float32)
+# SegFormer uses different normalization than ResNet
+# These are ImageNet stats used by OpenMMLab SegFormer
+IMG_MEAN = np.array((123.675, 116.28, 103.53), dtype=np.float32)
+IMG_STD = np.array((58.395, 57.12, 57.375), dtype=np.float32)
 
 palette = [128, 64, 128, 244, 35, 232, 70, 70, 70, 102, 102, 156, 190, 153, 153, 153, 153, 153, 250, 170, 30,
            220, 220, 0, 107, 142, 35, 152, 251, 152, 70, 130, 180, 220, 20, 60, 255, 0, 0, 0, 0, 142, 0, 0, 70,
@@ -44,18 +49,29 @@ def eval():
     args = get_arguments()
 
     # Load SegFormer B5 model
+    # Initialize with pretrained weights from HuggingFace
     model = SegformerForSemanticSegmentation.from_pretrained(
         "nvidia/segformer-b5-finetuned-cityscapes-1024-1024",
         num_labels=args.num_classes,
         ignore_mismatched_sizes=True
     )
     
-    if args.restore_from != RESTORE_FROM:
-        # Load custom checkpoint if provided
+    # Load custom checkpoint if provided (e.g., segformer_b5_cityscapes.pth)
+    if args.restore_from != RESTORE_FROM and os.path.exists(args.restore_from):
+        print(f"Loading checkpoint from {args.restore_from}")
         checkpoint = torch.load(args.restore_from, weights_only=False, map_location='cpu')
+        
+        # Handle different checkpoint formats
         if 'state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['state_dict'], strict=False)
+            # MMSegmentation format
+            state_dict = checkpoint['state_dict']
+            # Try to convert mmseg keys to transformers format if needed
+            # Note: If checkpoint is from mmseg, you may need key mapping
+            model.load_state_dict(state_dict, strict=False)
+        elif 'model' in checkpoint:
+            model.load_state_dict(checkpoint['model'], strict=False)
         else:
+            # Direct state dict
             model.load_state_dict(checkpoint, strict=False)
     
     start_iter = 0
@@ -78,11 +94,12 @@ def eval():
     device = torch.device('cuda:0')
     model.to(device)
 
-    testloader1 = data.DataLoader(foggyzurichDataSet(args.data_dir_eval, args.data_list_eval, crop_size=(1152, 648), mean=IMG_MEAN),
+    # Use SegFormer-compatible datasets with proper RGB normalization
+    testloader1 = data.DataLoader(SegformerFoggyZurichDataSet(args.data_dir_eval, args.data_list_eval, crop_size=(1152, 648)),
                                     batch_size=1, shuffle=False, pin_memory=True)
-    testloader2 = data.DataLoader(foggyzurichDataSet(args.data_dir_eval, args.data_list_eval, crop_size=(1536, 864), mean=IMG_MEAN),
+    testloader2 = data.DataLoader(SegformerFoggyZurichDataSet(args.data_dir_eval, args.data_list_eval, crop_size=(1536, 864)),
                                     batch_size=1, shuffle=False, pin_memory=True)
-    testloader3 = data.DataLoader(foggyzurichDataSet(args.data_dir_eval, args.data_list_eval, crop_size=(1920, 1080), mean=IMG_MEAN),
+    testloader3 = data.DataLoader(SegformerFoggyZurichDataSet(args.data_dir_eval, args.data_list_eval, crop_size=(1920, 1080)),
                                     batch_size=1, shuffle=False, pin_memory=True)
 
     if version.parse(torch.__version__) >= version.parse('0.4.0'):
@@ -128,13 +145,13 @@ def eval():
 
     # Test on Foggy Driving Dense (if available)
     try:
-        testloader1 = data.DataLoader(foggydrivingDataSet(args.data_dir_eval_fd, args.data_list_eval_fdd, scale=1),
+        testloader1 = data.DataLoader(SegformerFoggyDrivingDataSet(args.data_dir_eval_fd, args.data_list_eval_fdd, scale=1),
                                         batch_size=1, shuffle=False, pin_memory=True)
 
-        testloader2 = data.DataLoader(foggydrivingDataSet(args.data_dir_eval_fd, args.data_list_eval_fdd, scale=0.8),
+        testloader2 = data.DataLoader(SegformerFoggyDrivingDataSet(args.data_dir_eval_fd, args.data_list_eval_fdd, scale=0.8),
                                         batch_size=1, shuffle=False, pin_memory=True) 
 
-        testloader3 = data.DataLoader(foggydrivingDataSet(args.data_dir_eval_fd, args.data_list_eval_fdd, scale=0.6),
+        testloader3 = data.DataLoader(SegformerFoggyDrivingDataSet(args.data_dir_eval_fd, args.data_list_eval_fdd, scale=0.6),
                                         batch_size=1, shuffle=False, pin_memory=True)
         testloader_iter2 = enumerate(testloader2)
         testloader_iter3 = enumerate(testloader3)
@@ -180,13 +197,13 @@ def eval():
 
     # Test on Foggy Driving (if available)
     try:
-        testloader1 = data.DataLoader(foggydrivingDataSet(args.data_dir_eval_fd, args.data_list_eval_fd, scale=1),
+        testloader1 = data.DataLoader(SegformerFoggyDrivingDataSet(args.data_dir_eval_fd, args.data_list_eval_fd, scale=1),
                                         batch_size=1, shuffle=False, pin_memory=True) 
 
-        testloader2 = data.DataLoader(foggydrivingDataSet(args.data_dir_eval_fd, args.data_list_eval_fd, scale=0.8),
+        testloader2 = data.DataLoader(SegformerFoggyDrivingDataSet(args.data_dir_eval_fd, args.data_list_eval_fd, scale=0.8),
                                         batch_size=1, shuffle=False, pin_memory=True) 
 
-        testloader3 = data.DataLoader(foggydrivingDataSet(args.data_dir_eval_fd, args.data_list_eval_fd, scale=0.6),
+        testloader3 = data.DataLoader(SegformerFoggyDrivingDataSet(args.data_dir_eval_fd, args.data_list_eval_fd, scale=0.6),
                                         batch_size=1, shuffle=False, pin_memory=True) 
         testloader_iter2 = enumerate(testloader2)
         testloader_iter3 = enumerate(testloader3)
@@ -233,11 +250,11 @@ def eval():
 
     # Test on Clear Lindau (if available)
     try:
-        testloader1 = data.DataLoader(cityscapesDataSet(args.data_dir_city, args.data_city_list, crop_size = (2048, 1024), mean=IMG_MEAN, scale=False, mirror=False, set=args.set),
+        testloader1 = data.DataLoader(SegformerCityscapesDataSet(args.data_dir_city, args.data_city_list, crop_size = (2048, 1024), scale=False, mirror=False, set=args.set),
                                 batch_size=1, shuffle=False, pin_memory=True)
-        testloader2 = data.DataLoader(cityscapesDataSet(args.data_dir_city, args.data_city_list, crop_size = (2048*0.8, 1024*0.8), mean=IMG_MEAN, scale=False, mirror=False, set=args.set),
+        testloader2 = data.DataLoader(SegformerCityscapesDataSet(args.data_dir_city, args.data_city_list, crop_size = (2048*0.8, 1024*0.8), scale=False, mirror=False, set=args.set),
                                 batch_size=1, shuffle=False, pin_memory=True)
-        testloader3 = data.DataLoader(cityscapesDataSet(args.data_dir_city, args.data_city_list, crop_size = (2048*0.6, 1024*0.6), mean=IMG_MEAN, scale=False, mirror=False, set=args.set),
+        testloader3 = data.DataLoader(SegformerCityscapesDataSet(args.data_dir_city, args.data_city_list, crop_size = (2048*0.6, 1024*0.6), scale=False, mirror=False, set=args.set),
                                 batch_size=1, shuffle=False, pin_memory=True)   
         testloader_iter2 = enumerate(testloader2)
         testloader_iter3 = enumerate(testloader3)
