@@ -1,0 +1,4 @@
+# Ignore model checkpoints (too large for GitHub)
+*.pth
+*.pt
+*.ckpt
