@@ -17,7 +17,7 @@ RESTORE_FROM = 'no model'
 SNAPSHOT_DIR = f'./snapshots/FIFO'
 GT_DIR_FZ = '/root/data/Foggy_Zurich'
 GT_DIR_FD = '/root/data/Foggy_Driving'
-GT_DIR_CLINDAU = '/root/data/gtFine/gtFine'
+GT_DIR_CLINDAU = '/root/data/Cityscapes/gtFine/'
 SET = 'val'
 
 MODEL = 'RefineNetNew'
@@ -44,4 +44,5 @@ def get_arguments():
     parser.add_argument("--devkit-dir-fz", default='/root/data/foggy_zurich/Foggy_Zurich/lists_file_names') 
     parser.add_argument("--devkit-dir-fd", default='/workspace/FIFO_impr/FIFO_impr/lists_file_names') 
     parser.add_argument("--devkit-dir-clindau", default='/workspace/FIFO_impr/FIFO_impr/dataset/cityscapes_list')
+    parser.add_argument("--use-segformer", action="store_true", default=False, help="Use SegFormer MIT-B5 backbone (auto-detected from checkpoint)")
     return parser.parse_args()

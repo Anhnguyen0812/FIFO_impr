@@ -143,7 +143,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--gt-dir', type=str, help='directory which stores CityScapes val gt images')
     parser.add_argument('--pred-dir', type=str, help='directory which stores CityScapes val pred images')
-    parser.add_argument('--devkit_dir', default='/root/data1/Foggy_Zurich/lists_file_names', help='base directory of zurich')
+    parser.add_argument('--devkit_dir', default='/root/data/Foggy_Zurich/lists_file_names', help='base directory of zurich')
     parser.add_argument('--dataset', type=str)
     args = parser.parse_args()
     miou(args)

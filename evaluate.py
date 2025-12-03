@@ -17,6 +17,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 from model.refinenetlw import rf_lw101
+from model.segformer_backbone import segformer_fifo
 from compute_iou import compute_mIoU
 from configs.test_config import get_arguments
 from dataset.cityscapes_dataset import cityscapesDataSet
@@ -45,14 +46,48 @@ def eval():
 
     if args.restore_from == RESTORE_FROM:
         start_iter = 0
-        model = rf_lw101(num_classes=args.num_classes)
+        # Default to ResNet if no checkpoint provided
+        use_segformer = getattr(args, 'use_segformer', False)
+        if use_segformer:
+            print("\n" + "="*70)
+            print("Using SegFormer MIT-B5 backbone for evaluation")
+            print("="*70)
+            model = segformer_fifo(num_classes=args.num_classes)
+        else:
+            print("\nUsing ResNet-101 backbone for evaluation")
+            model = rf_lw101(num_classes=args.num_classes)
 
     else:
-        restore = torch.load(args.restore_from, weights_only=False)
-        model = rf_lw101(num_classes=args.num_classes)
+        restore = torch.load(args.restore_from, weights_only=False, map_location='cpu')
+        
+        # Auto-detect model type from checkpoint
+        use_segformer = False
+        if 'args' in restore and hasattr(restore['args'], 'use_segformer'):
+            use_segformer = restore['args'].use_segformer
+        elif 'state_dict' in restore:
+            # Check if checkpoint has SegFormer layers
+            first_key = list(restore['state_dict'].keys())[0]
+            if 'backbone.segformer' in first_key or 'segformer' in first_key:
+                use_segformer = True
+        
+        if use_segformer:
+            print("\n" + "="*70)
+            print("✓ Detected SegFormer checkpoint")
+            print("  Loading SegFormer MIT-B5 backbone")
+            print("="*70)
+            model = segformer_fifo(
+                num_classes=args.num_classes,
+                pretrained=False  # Load from checkpoint, not pretrained
+            )
+        else:
+            print("\n✓ Detected ResNet-101 checkpoint")
+            model = rf_lw101(num_classes=args.num_classes)
 
         model.load_state_dict(restore['state_dict'])
         start_iter = 0
+        print(f"✓ Checkpoint loaded successfully")
+        if 'train_iter' in restore:
+            print(f"  Trained for {restore['train_iter']} iterations")
 
     save_dir_fz = osp.join(f'./result_FZ', args.file_name)
     save_dir_fd = osp.join(f'./result_FD', args.file_name)

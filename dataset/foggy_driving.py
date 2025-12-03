@@ -130,7 +130,7 @@ class foggydrivingDataSet(data.Dataset):
         return mask
 
 if __name__ == '__main__':
-    dst = foggydrivingDataSet("/root/data1", is_transform=True)
+    dst = foggydrivingDataSet("/root/data", is_transform=True)
     trainloader = data.DataLoader(dst, batch_size=4)
     for i, data in enumerate(trainloader):
         imgs, labels = data

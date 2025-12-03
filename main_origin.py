@@ -17,13 +17,9 @@ from tqdm import tqdm
 from PIL import Image
 from packaging import version
 from datetime import datetime
-import matplotlib.pyplot as plt
-import subprocess
 
 from model.refinenetlw import rf_lw101
-from model.segformer_backbone import segformer_fifo
 from model.fogpassfilter import FogPassFilter_conv1, FogPassFilter_res1
-from model.dual_encoder import DualEncoderModel, DiceLoss
 from utils.losses import CrossEntropy2d
 from dataset.paired_cityscapes import Pairedcityscapes
 from dataset.Foggy_Zurich import foggyzurichDataSet
@@ -48,36 +44,16 @@ def gram_matrix(tensor):
     gram = torch.mm(tensor, tensor.t())
     return gram
 
-class FocalLoss(nn.Module):
-    """Focal Loss for handling class imbalance in boundary detection.
-    
-    Args:
-        alpha: Weighting factor in [0, 1] to balance positive/negative examples
-        gamma: Exponent of modulating factor (1 - p_t)^gamma
-    """
-    def __init__(self, alpha=0.25, gamma=2.0):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        
-    def forward(self, pred, target):
-        # pred: [B, 1, H, W] logits
-        # target: [B, 1, H, W] binary labels (0 or 1)
-        bce = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
-        pt = torch.exp(-bce)  # probability of correct class
-        focal = self.alpha * (1 - pt) ** self.gamma * bce
-        return focal.mean()
-
 def setup_optimisers_and_schedulers(args, model):
     optimisers = get_optimisers(
         model=model,
         enc_optim_type="sgd",
-        enc_lr=5e-5,
-        enc_weight_decay=5e-4,
+        enc_lr=6e-4,
+        enc_weight_decay=1e-5,
         enc_momentum=0.9,
         dec_optim_type="sgd",
-        dec_lr=5e-4,
-        dec_weight_decay=5e-4,
+        dec_lr=6e-3,
+        dec_weight_decay=1e-5,
         dec_momentum=0.9,
     )
     schedulers = get_lr_schedulers(
@@ -127,39 +103,13 @@ def main():
     cudnn.enabled = True
     gpu = args.gpu
 
-    # Model selection: ResNet-101 (default) or SegFormer MIT-B3
-    use_segformer = args.use_segformer
-    
     if args.restore_from == RESTORE_FROM:
         start_iter = 0
-        if use_segformer:
-            print("\n" + "="*70)
-            print("Using SegFormer MIT-B3 backbone (Transformer-based)")
-            print("="*70)
-            model = segformer_fifo(
-                num_classes=args.num_classes,
-                pretrained=True,
-                pretrained_model_name=args.segformer_model,
-                freeze_encoder=args.freeze_segformer_encoder
-            )
-        else:
-            print("\nUsing ResNet-101 backbone (default)")
-            model = rf_lw101(num_classes=args.num_classes)
+        model = rf_lw101(num_classes=args.num_classes)
  
     else:
-        restore = torch.load(args.restore_from, weights_only=False)
-        if use_segformer:
-            print("\n" + "="*70)
-            print("Restoring SegFormer MIT-B3 backbone")
-            print("="*70)
-            model = segformer_fifo(
-                num_classes=args.num_classes,
-                pretrained=False,  # Don't reload pretrained, use checkpoint
-                freeze_encoder=args.freeze_segformer_encoder
-            )
-        else:
-            print("\nRestoring ResNet-101 backbone")
-            model = rf_lw101(num_classes=args.num_classes)
+        restore = torch.load(args.restore_from)
+        model = rf_lw101(num_classes=args.num_classes)
 
         model.load_state_dict(restore['state_dict'])
         start_iter = 0
@@ -181,32 +131,10 @@ def main():
     FogPassFilter2_optimizer = torch.optim.Adamax([p for p in FogPassFilter2.parameters() if p.requires_grad == True], lr=lr_fpf2)
     FogPassFilter2.cuda(args.gpu)
 
-    # Initialize Dual Encoder (DINOv3 + SAM 2)
-    # Replaces boundary head with powerful frozen encoders + trainable fusion
-    num_classes = 19  # Cityscapes classes
-    DualEncoder_model = DualEncoderModel(num_classes=num_classes, freeze_encoders=True)
-    DualEncoder_model.train()
-    DualEncoder_model.cuda(args.gpu)
-    
-    # Optimizer for trainable parts only (fusion + decoder)
-    DualEncoder_optimizer = torch.optim.Adam(
-        DualEncoder_model.get_trainable_parameters(), 
-        lr=1e-4,  # Lower LR since we have frozen pretrained encoders
-        weight_decay=1e-4
-    )
-    
-    # Combined loss: CrossEntropy + Dice for better boundaries
-    dice_criterion = DiceLoss(smooth=1.0)
-
     if args.restore_from_fogpass != RESTORE_FROM_fogpass:
-        restore = torch.load(args.restore_from_fogpass, weights_only=False)
+        restore = torch.load(args.restore_from_fogpass)
         FogPassFilter1.load_state_dict(restore['fogpass1_state_dict'])
         FogPassFilter2.load_state_dict(restore['fogpass2_state_dict'])
-        if 'dual_encoder_state_dict' in restore:
-            DualEncoder_model.load_state_dict(restore['dual_encoder_state_dict'])
-            print('✓ Dual Encoder weights restored')
-        elif 'boundary_state_dict' in restore:
-            print('⚠ Old boundary checkpoint detected, skipping (incompatible with Dual Encoder)')
 
     fogpassfilter_loss = losses.ContrastiveLoss(
         pos_margin=0.1,
@@ -252,30 +180,14 @@ def main():
     m = nn.Softmax(dim=1)
     log_m = nn.LogSoftmax(dim=1)    
 
-    # Warmup for boundary loss to let segmentation stabilise first
-    boundary_warmup_iters = 3000
-    
-    # Gradient accumulation counter
-    accum_step = 0
-
-    # Loss history for plotting
-    loss_history = {'total': [], 'seg_sf': [], 'seg_cw': [], 'fsm': [], 'con': [], 'boundary': []}
-
     for i_iter in tqdm(range(start_iter, args.num_steps)): 
         loss_seg_cw_value = 0
         loss_seg_sf_value = 0
         loss_fsm_value = 0
         loss_con_value = 0
-        loss_boundary_value = 0
 
-        # Zero gradients only at the start of accumulation cycle
-        if accum_step == 0:
-            for opt in opts:
-                opt.zero_grad()
-            if i_iter >= boundary_warmup_iters:
-                DualEncoder_optimizer.zero_grad()
-            FogPassFilter1_optimizer.zero_grad()
-            FogPassFilter2_optimizer.zero_grad()
+        for opt in opts:
+            opt.zero_grad()
 
         for sub_i in range(args.iter_size):
             # train fog-pass filtering module
@@ -350,22 +262,15 @@ def main():
                     fog_factor_cw[batch_idx] = fogpassfilter(vector_cw_gram[batch_idx])
                     fog_factor_rf[batch_idx] = fogpassfilter(vector_rf_gram[batch_idx])                                                                                                                                                                                                
 
-                # Dynamically build fog_factor_embeddings based on actual batch size
-                fog_factor_list = []
-                fog_factor_labels_list = []
-                for batch_idx in range(args.batch_size):
-                    fog_factor_list.extend([
-                        torch.unsqueeze(fog_factor_sf[batch_idx], 0),
-                        torch.unsqueeze(fog_factor_cw[batch_idx], 0),
-                        torch.unsqueeze(fog_factor_rf[batch_idx], 0)
-                    ])
-                    fog_factor_labels_list.extend([0, 1, 2])
-                
-                fog_factor_embeddings = torch.cat(fog_factor_list, 0)
+                fog_factor_embeddings = torch.cat((torch.unsqueeze(fog_factor_sf[0],0),torch.unsqueeze(fog_factor_cw[0],0),torch.unsqueeze(fog_factor_rf[0],0),
+                                                   torch.unsqueeze(fog_factor_sf[1],0),torch.unsqueeze(fog_factor_cw[1],0),torch.unsqueeze(fog_factor_rf[1],0),
+                                                   torch.unsqueeze(fog_factor_sf[2],0),torch.unsqueeze(fog_factor_cw[2],0),torch.unsqueeze(fog_factor_rf[2],0),
+                                                   torch.unsqueeze(fog_factor_sf[3],0),torch.unsqueeze(fog_factor_cw[3],0),torch.unsqueeze(fog_factor_rf[3],0)),0)
+
                 fog_factor_embeddings_norm = torch.norm(fog_factor_embeddings, p=2, dim=1).detach()
                 size_fog_factor = fog_factor_embeddings.size()
-                fog_factor_embeddings = fog_factor_embeddings.div(fog_factor_embeddings_norm.expand(size_fog_factor[1], args.batch_size * 3).t())
-                fog_factor_labels = torch.LongTensor(fog_factor_labels_list)
+                fog_factor_embeddings = fog_factor_embeddings.div(fog_factor_embeddings_norm.expand(size_fog_factor[1],12).t())
+                fog_factor_labels = torch.LongTensor([0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2])
                 fog_pass_filter_loss = fogpassfilter_loss(fog_factor_embeddings,fog_factor_labels)
 
                 total_fpf_loss +=  fog_pass_filter_loss 
@@ -373,8 +278,7 @@ def main():
                 wandb.log({f'layer{idx}/fpf loss': fog_pass_filter_loss}, step=i_iter)
                 wandb.log({f'layer{idx}/total fpf loss': total_fpf_loss}, step=i_iter)
 
-            # Scale fog-pass filter loss by accumulation steps
-            (total_fpf_loss / args.accum_steps).backward(retain_graph=False)
+            total_fpf_loss.backward(retain_graph=False)
 
 
             if args.modeltrain=='train':
@@ -471,7 +375,7 @@ def main():
 
                     fogpassfilter.eval()
 
-                    for batch_idx in range(args.batch_size):
+                    for batch_idx in range(4):
                         b_gram = gram_matrix(b_feature[batch_idx])
                         a_gram = gram_matrix(a_feature[batch_idx])
 
@@ -487,74 +391,10 @@ def main():
                         
                         layer_fsm_loss += fsm_weights[layer]*torch.mean((fog_factor_b/(hb*wb) - fog_factor_a/(ha*wa))**2)/half/ b_feature.size(0)
 
-                    loss_fsm += layer_fsm_loss / args.batch_size
+                    loss_fsm += layer_fsm_loss / 4.
 
-                # Dual Encoder Loss (DINOv3 + SAM 2 for enhanced segmentation)
-                loss_boundary = 0
-                boundary_weight = 0.0
-
-                # Adaptive dual encoder weight schedule
-                if i_iter < boundary_warmup_iters:
-                    boundary_weight = 0.0  # Warmup: stabilize main segmentation first
-                elif i_iter < 6000:
-                    boundary_weight = args.lambda_boundary * 0.5  # Gradual ramp-up
-                else:
-                    boundary_weight = args.lambda_boundary  # Full weight (default 0.1)
-
-                # Enable dual encoder loss after warmup
-                if i_iter >= boundary_warmup_iters:
-                    DualEncoder_model.train()
-
-                    # Ground truth labels
-                    label_tensor = label.cuda(args.gpu)  # [B, H, W]
-                    
-                    # Dual Encoder forward pass with different fog conditions
-                    if i_iter % 3 == 0:
-                        # Both SF and CW available: train on both + consistency
-                        # Clear weather (CW) - primary supervision
-                        output_cw = DualEncoder_model(images_cw)
-                        logits_cw = output_cw['logits']
-                        loss_de_ce_cw = F.cross_entropy(logits_cw, label_tensor)
-                        loss_de_dice_cw = dice_criterion(logits_cw, label_tensor)
-                        
-                        # Synthetic fog (SF) - secondary supervision with lower weight
-                        output_sf = DualEncoder_model(images)
-                        logits_sf = output_sf['logits']
-                        loss_de_ce_sf = F.cross_entropy(logits_sf, label_tensor)
-                        loss_de_dice_sf = dice_criterion(logits_sf, label_tensor)
-                        
-                        # Feature consistency: SF should extract similar features to CW
-                        loss_feature_consistency = F.mse_loss(
-                            output_sf['fused_features'],
-                            output_cw['fused_features'].detach()  # Use CW as teacher
-                        )
-                        
-                        # Combined loss: CE + Dice for both, plus consistency
-                        loss_boundary = (
-                            (loss_de_ce_cw + 0.5 * loss_de_dice_cw) +  # CW: full weight
-                            0.5 * (loss_de_ce_sf + 0.5 * loss_de_dice_sf) +  # SF: half weight
-                            0.1 * loss_feature_consistency  # Weak consistency for robustness
-                        )
-                        
-                    elif i_iter % 3 == 1:
-                        # Only SF available
-                        output_sf = DualEncoder_model(images)
-                        logits_sf = output_sf['logits']
-                        loss_de_ce_sf = F.cross_entropy(logits_sf, label_tensor)
-                        loss_de_dice_sf = dice_criterion(logits_sf, label_tensor)
-                        loss_boundary = 0.5 * (loss_de_ce_sf + 0.5 * loss_de_dice_sf)
-                        
-                    elif i_iter % 3 == 2:
-                        # Only CW available
-                        output_cw = DualEncoder_model(images_cw)
-                        logits_cw = output_cw['logits']
-                        loss_de_ce_cw = F.cross_entropy(logits_cw, label_tensor)
-                        loss_de_dice_cw = dice_criterion(logits_cw, label_tensor)
-                        loss_boundary = loss_de_ce_cw + 0.5 * loss_de_dice_cw
-
-                loss = loss_seg_sf + loss_seg_cw + args.lambda_fsm*loss_fsm + args.lambda_con*loss_con + boundary_weight*loss_boundary
-                # Scale loss by both iter_size and accumulation steps
-                loss = loss / (args.iter_size * args.accum_steps)
+                loss = loss_seg_sf + loss_seg_cw + args.lambda_fsm*loss_fsm + args.lambda_con*loss_con  
+                loss = loss / args.iter_size
                 loss.backward()
 
                 if loss_seg_cw != 0:
@@ -565,40 +405,16 @@ def main():
                     loss_fsm_value += loss_fsm.data.cpu().numpy() / args.iter_size
                 if loss_con != 0:
                     loss_con_value += loss_con.data.cpu().numpy() / args.iter_size
-                if loss_boundary != 0:
-                    loss_boundary_value += loss_boundary.data.cpu().numpy() / args.iter_size
 
             
                 wandb.log({"fsm loss": args.lambda_fsm*loss_fsm_value}, step=i_iter)
                 wandb.log({'SF_loss_seg': loss_seg_sf_value}, step=i_iter)
                 wandb.log({'CW_loss_seg': loss_seg_cw_value}, step=i_iter)
                 wandb.log({'consistency loss':args.lambda_con*loss_con_value}, step=i_iter)
-                wandb.log({'boundary loss':boundary_weight*loss_boundary_value}, step=i_iter)
-                wandb.log({'total_loss': loss}, step=i_iter)
+                wandb.log({'total_loss': loss}, step=i_iter)           
 
-                # Collect losses for plotting
-                loss_history['total'].append(loss.item() if hasattr(loss, 'item') else loss)
-                loss_history['seg_sf'].append(loss_seg_sf_value)
-                loss_history['seg_cw'].append(loss_seg_cw_value)
-                loss_history['fsm'].append(args.lambda_fsm*loss_fsm_value)
-                loss_history['con'].append(args.lambda_con*loss_con_value)
-                loss_history['boundary'].append(boundary_weight*loss_boundary_value)
-        
-        # Increment accumulation step counter
-        accum_step += 1
-        
-        # Only update weights after accumulating enough gradients
-        if accum_step >= args.accum_steps:
-            accum_step = 0  # Reset counter
-            
-            # Update all optimizers
-            if args.modeltrain == 'train':
                 for opt in opts:
                     opt.step()
-                
-                # Update dual encoder only when it is active
-                if i_iter >= boundary_warmup_iters:
-                    DualEncoder_optimizer.step()
 
             FogPassFilter1_optimizer.step()
             FogPassFilter2_optimizer.step()
@@ -619,52 +435,12 @@ def main():
                 torch.save({'state_dict':model.state_dict(),
                 'fogpass1_state_dict':FogPassFilter1.state_dict(),
                 'fogpass2_state_dict':FogPassFilter2.state_dict(),
-                'dual_encoder_state_dict':DualEncoder_model.state_dict(),
                 'train_iter':i_iter,
                 'args':args
                 },osp.join(args.snapshot_dir, run_name)+'_fogpassfilter_'+str(i_iter)+'.pth')
 
         if i_iter % save_pred_every == 0 and i_iter != 0:
             print('taking snapshot ...')
-            # Compute additional metrics
-            enc_lr = opts[0].param_groups[0]['lr'] if opts else 0
-            dec_lr = opts[1].param_groups[0]['lr'] if len(opts) > 1 else 0
-            grad_norm = 0
-            if model.parameters():
-                grad_norm = torch.norm(torch.stack([torch.norm(p.grad.detach()) for p in model.parameters() if p.grad is not None]), 2).item() if any(p.grad is not None for p in model.parameters()) else 0
-            memory_mb = torch.cuda.memory_allocated(args.gpu) / 1e6 if torch.cuda.is_available() else 0
-            
-            print(f'Step {i_iter} - SF_loss: {loss_seg_sf_value:.4f}, CW_loss: {loss_seg_cw_value:.4f}, FSM_loss: {args.lambda_fsm*loss_fsm_value:.6f}, Consistency_loss: {args.lambda_con*loss_con_value:.6f}, Boundary_loss: {boundary_weight*loss_boundary_value:.4f}')
-            print(f'LR: Enc {enc_lr:.6f}, Dec {dec_lr:.6f} | Grad Norm: {grad_norm:.4f} | Memory: {memory_mb:.1f} MB')
-            
-            # Plot losses
-            plt.figure(figsize=(12, 8))
-            steps = list(range(len(loss_history['total'])))
-            plt.subplot(2, 3, 1)
-            plt.plot(steps, loss_history['total'], label='Total Loss')
-            plt.title('Total Loss')
-            plt.subplot(2, 3, 2)
-            plt.plot(steps, loss_history['seg_sf'], label='SF Seg Loss')
-            plt.title('SF Segmentation Loss')
-            plt.subplot(2, 3, 3)
-            plt.plot(steps, loss_history['seg_cw'], label='CW Seg Loss')
-            plt.title('CW Segmentation Loss')
-            plt.subplot(2, 3, 4)
-            plt.plot(steps, loss_history['fsm'], label='FSM Loss')
-            plt.title('FSM Loss')
-            plt.subplot(2, 3, 5)
-            plt.plot(steps, loss_history['con'], label='Consistency Loss')
-            plt.title('Consistency Loss')
-            plt.subplot(2, 3, 6)
-            plt.plot(steps, loss_history['boundary'], label='Boundary Loss')
-            plt.title('Boundary Loss')
-            plt.tight_layout()
-            # Ensure './result' directory exists
-            if not os.path.exists('./result'):
-                os.makedirs('./result')
-            plt.savefig(f'./result/loss_plots_step_{i_iter}.png')
-            plt.close()
-            
             save_dir = osp.join(f'./result/FIFO_model', args.file_name)
             
             if not os.path.exists(save_dir):
@@ -674,29 +450,9 @@ def main():
                 'state_dict':model.state_dict(),
                 'fogpass1_state_dict':FogPassFilter1.state_dict(),
                 'fogpass2_state_dict':FogPassFilter2.state_dict(),
-                'dual_encoder_state_dict':DualEncoder_model.state_dict(),
                 'train_iter':i_iter,
                 'args':args
             },osp.join(args.snapshot_dir, run_name)+'_FIFO'+str(i_iter)+'.pth')
-            
-            # Run evaluation every 2000 steps
-            if i_iter % 2000 == 0:
-                print('Running evaluation...')
-                eval_cmd = [
-                    'python', 'evaluate.py',
-                    '--restore-from', osp.join(args.snapshot_dir, run_name)+'_FIFO'+str(i_iter)+'.pth',
-                    '--gpu', str(args.gpu),
-                    '--file-name', args.file_name
-                ]
-                try:
-                    result = subprocess.run(eval_cmd, capture_output=True, text=True, cwd=os.getcwd())
-                    print('Evaluation output:')
-                    print(result.stdout)
-                    if result.stderr:
-                        print('Evaluation errors:')
-                        print(result.stderr)
-                except Exception as e:
-                    print(f'Error running evaluation: {e}')
             
 if __name__ == '__main__':
     main()
