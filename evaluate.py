@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import warnings
 warnings.filterwarnings("ignore")
 
-from model.refinenetlw import rf_lw101
+from transformers import SegformerForSemanticSegmentation
 from compute_iou import compute_mIoU
 from configs.test_config import get_arguments
 from dataset.cityscapes_dataset import cityscapesDataSet
@@ -43,16 +43,22 @@ def eval():
     """Create the model and start the evaluation process."""
     args = get_arguments()
 
-    if args.restore_from == RESTORE_FROM:
-        start_iter = 0
-        model = rf_lw101(num_classes=args.num_classes)
-
-    else:
-        restore = torch.load(args.restore_from, weights_only=False)
-        model = rf_lw101(num_classes=args.num_classes)
-
-        model.load_state_dict(restore['state_dict'])
-        start_iter = 0
+    # Load SegFormer B5 model
+    model = SegformerForSemanticSegmentation.from_pretrained(
+        "nvidia/segformer-b5-finetuned-cityscapes-1024-1024",
+        num_labels=args.num_classes,
+        ignore_mismatched_sizes=True
+    )
+    
+    if args.restore_from != RESTORE_FROM:
+        # Load custom checkpoint if provided
+        checkpoint = torch.load(args.restore_from, weights_only=False, map_location='cpu')
+        if 'state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['state_dict'], strict=False)
+        else:
+            model.load_state_dict(checkpoint, strict=False)
+    
+    start_iter = 0
 
     save_dir_fz = osp.join(f'./result_FZ', args.file_name)
     save_dir_fd = osp.join(f'./result_FD', args.file_name)
@@ -91,20 +97,20 @@ def eval():
     for index, batch1 in enumerate(testloader1):
         image, label_test, _, name = batch1
         with torch.no_grad():
-            output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(args.gpu))
-            output_1 = interp_eval(output2)
+            outputs = model(Variable(image).cuda(args.gpu))
+            output_1 = interp_eval(outputs.logits)
 
         _, batch2 = testloader_iter2.__next__()
         image, label_test, _, name = batch2
         with torch.no_grad():
-            output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(args.gpu))
-            output_2 = interp_eval(output2)
+            outputs = model(Variable(image).cuda(args.gpu))
+            output_2 = interp_eval(outputs.logits)
 
         _, batch3 = testloader_iter3.__next__()    
         image, label_test, _, name = batch3
         with torch.no_grad():
-            output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(args.gpu))
-            output_3 = interp_eval(output2)
+            outputs = model(Variable(image).cuda(args.gpu))
+            output_3 = interp_eval(outputs.logits)
 
         output = torch.cat([output_1,output_2,output_3])
         output = torch.mean(output, dim=0)
@@ -136,21 +142,21 @@ def eval():
         for index, batch in enumerate(testloader1):
             image, size, name = batch
             with torch.no_grad():
-                output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(args.gpu))
+                outputs = model(Variable(image).cuda(args.gpu))
                 interp_eval = nn.Upsample(size=(size[0][0],size[0][1]), mode='bilinear')
-                output_1 = interp_eval(output2)
+                output_1 = interp_eval(outputs.logits)
 
             _, batch2 = testloader_iter2.__next__()
             image, _, name = batch2
             with torch.no_grad():
-                output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(args.gpu))
-                output_2 = interp_eval(output2)
+                outputs = model(Variable(image).cuda(args.gpu))
+                output_2 = interp_eval(outputs.logits)
 
             _, batch3 = testloader_iter3.__next__()    
             image, _, name = batch3
             with torch.no_grad():
-                output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(args.gpu))
-                output_3 = interp_eval(output2)
+                outputs = model(Variable(image).cuda(args.gpu))
+                output_3 = interp_eval(outputs.logits)
 
             output = torch.cat([output_1,output_2,output_3])
             output = torch.mean(output, dim=0)
@@ -188,22 +194,22 @@ def eval():
         for index, batch in enumerate(testloader1):
             image, size, name = batch
             with torch.no_grad():
-                output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(args.gpu))
+                outputs = model(Variable(image).cuda(args.gpu))
                 interp_eval = nn.Upsample(size=(size[0][0],size[0][1]), mode='bilinear')
 
-                output_1 = interp_eval(output2)
+                output_1 = interp_eval(outputs.logits)
 
             _, batch2 = testloader_iter2.__next__()
             image, _, name = batch2
             with torch.no_grad():
-                output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(args.gpu))
-                output_2 = interp_eval(output2)
+                outputs = model(Variable(image).cuda(args.gpu))
+                output_2 = interp_eval(outputs.logits)
 
             _, batch3 = testloader_iter3.__next__()    
             image, _, name = batch3
             with torch.no_grad():
-                output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(args.gpu))
-                output_3 = interp_eval(output2)
+                outputs = model(Variable(image).cuda(args.gpu))
+                output_3 = interp_eval(outputs.logits)
 
             output = torch.cat([output_1,output_2,output_3])
             output = torch.mean(output, dim=0)
@@ -239,21 +245,21 @@ def eval():
         for index, batch in enumerate(testloader1):
             image, size, name = batch
             with torch.no_grad():
-                output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(args.gpu))
+                outputs = model(Variable(image).cuda(args.gpu))
                 interp_eval = nn.Upsample(size=(1024, 2048), mode='bilinear')
-                output_1 = interp_eval(output2)
+                output_1 = interp_eval(outputs.logits)
 
             _, batch2 = testloader_iter2.__next__()
             image, _, name = batch2
             with torch.no_grad():
-                output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(args.gpu))
-                output_2 = interp_eval(output2)
+                outputs = model(Variable(image).cuda(args.gpu))
+                output_2 = interp_eval(outputs.logits)
 
             _, batch3 = testloader_iter3.__next__()    
             image, _, name = batch3
             with torch.no_grad():
-                output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(args.gpu))
-                output_3 = interp_eval(output2)
+                outputs = model(Variable(image).cuda(args.gpu))
+                output_3 = interp_eval(outputs.logits)
 
             output = torch.cat([output_1,output_2,output_3])
             output = torch.mean(output, dim=0)
