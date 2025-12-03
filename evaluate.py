@@ -129,10 +129,11 @@ def eval():
             outputs = model(Variable(image).cuda(args.gpu))
             output_3 = interp_eval(outputs.logits)
 
-        output = torch.cat([output_1,output_2,output_3])
-        output = torch.mean(output, dim=0)
+        output = torch.cat([output_1, output_2, output_3], dim=0)
+        output = torch.mean(output, dim=0, keepdim=True)
+        output = output.squeeze(0)  # Remove batch dimension
         output = output.cpu().numpy()
-        output = output.transpose(1,2,0)
+        output = output.transpose(1, 2, 0)
         output = np.asarray(np.argmax(output, axis=2), dtype=np.uint8)
 
         output_col = colorize_mask(output)
@@ -158,9 +159,11 @@ def eval():
 
         for index, batch in enumerate(testloader1):
             image, size, name = batch
+            # size is a list from dataloader, need to extract H and W
+            target_h, target_w = size[0], size[1]
             with torch.no_grad():
                 outputs = model(Variable(image).cuda(args.gpu))
-                interp_eval = nn.Upsample(size=(size[0][0],size[0][1]), mode='bilinear')
+                interp_eval = nn.Upsample(size=(target_h, target_w), mode='bilinear')
                 output_1 = interp_eval(outputs.logits)
 
             _, batch2 = testloader_iter2.__next__()
@@ -175,8 +178,9 @@ def eval():
                 outputs = model(Variable(image).cuda(args.gpu))
                 output_3 = interp_eval(outputs.logits)
 
-            output = torch.cat([output_1,output_2,output_3])
-            output = torch.mean(output, dim=0)
+            output = torch.cat([output_1, output_2, output_3], dim=0)
+            output = torch.mean(output, dim=0, keepdim=True)
+            output = output.squeeze(0)  # Remove batch dimension
             output = output.cpu().numpy()
             output = output.transpose(1,2,0)
             output = np.asarray(np.argmax(output, axis=2), dtype=np.uint8)
@@ -210,9 +214,11 @@ def eval():
 
         for index, batch in enumerate(testloader1):
             image, size, name = batch
+            # size is a list from dataloader, need to extract H and W
+            target_h, target_w = size[0], size[1]
             with torch.no_grad():
                 outputs = model(Variable(image).cuda(args.gpu))
-                interp_eval = nn.Upsample(size=(size[0][0],size[0][1]), mode='bilinear')
+                interp_eval = nn.Upsample(size=(target_h, target_w), mode='bilinear')
 
                 output_1 = interp_eval(outputs.logits)
 
@@ -228,8 +234,9 @@ def eval():
                 outputs = model(Variable(image).cuda(args.gpu))
                 output_3 = interp_eval(outputs.logits)
 
-            output = torch.cat([output_1,output_2,output_3])
-            output = torch.mean(output, dim=0)
+            output = torch.cat([output_1, output_2, output_3], dim=0)
+            output = torch.mean(output, dim=0, keepdim=True)
+            output = output.squeeze(0)  # Remove batch dimension
             output = output.cpu().numpy()
             output = output.transpose(1,2,0)
             output = np.asarray(np.argmax(output, axis=2), dtype=np.uint8)
@@ -278,10 +285,11 @@ def eval():
                 outputs = model(Variable(image).cuda(args.gpu))
                 output_3 = interp_eval(outputs.logits)
 
-            output = torch.cat([output_1,output_2,output_3])
-            output = torch.mean(output, dim=0)
+            output = torch.cat([output_1, output_2, output_3], dim=0)
+            output = torch.mean(output, dim=0, keepdim=True)
+            output = output.squeeze(0)  # Remove batch dimension
             output = output.cpu().numpy()
-            output = output.transpose(1,2,0)
+            output = output.transpose(1, 2, 0)
             output = np.asarray(np.argmax(output, axis=2), dtype=np.uint8)
 
             output_col = colorize_mask(output)
