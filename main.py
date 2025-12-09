@@ -116,17 +116,19 @@ def main():
     if args.restore_from == RESTORE_FROM:
         start_iter = 0
         model = rf_lw101(num_classes=args.num_classes)
- 
     else:
         restore = torch.load(args.restore_from, weights_only=False)
         model = rf_lw101(num_classes=args.num_classes)
-
         model.load_state_dict(restore['state_dict'])
         start_iter = 0
 
+    # Enable multi-GPU if available
+    if torch.cuda.device_count() > 1:
+        model = nn.DataParallel(model)
 
     model.train()
     model.cuda(args.gpu)
+    base_model = model.module if isinstance(model, nn.DataParallel) else model
 
     lr_fpf1 = 1e-3 
     lr_fpf2 = 1e-3
@@ -185,7 +187,7 @@ def main():
     cwsf_pair_loader_iter_fogpass = enumerate(cwsf_pair_loader_fogpass)
     rf_loader_iter_fogpass = enumerate(rf_loader_fogpass)
 
-    optimisers, schedulers = setup_optimisers_and_schedulers(args, model=model)
+    optimisers, schedulers = setup_optimisers_and_schedulers(args, model=base_model)
     opts = make_list(optimisers)
     kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
     m = nn.Softmax(dim=1)
@@ -492,11 +494,11 @@ def main():
 
         if i_iter >= args.num_steps_stop - 1:
             print('save model ..')
-            torch.save(model.state_dict(), osp.join(args.snapshot_dir, args.file_name + str(args.num_steps_stop) + '.pth'))
+            torch.save(base_model.state_dict(), osp.join(args.snapshot_dir, args.file_name + str(args.num_steps_stop) + '.pth'))
             break
         if args.modeltrain != 'train':
             if i_iter == 5000:
-                torch.save({'state_dict':model.state_dict(),
+                torch.save({'state_dict':base_model.state_dict(),
                 'fogpass1_state_dict':FogPassFilter1.state_dict(),
                 'fogpass2_state_dict':FogPassFilter2.state_dict(),
                 'train_iter':i_iter,
@@ -512,7 +514,7 @@ def main():
                 os.makedirs(save_dir)
             
             torch.save({
-                'state_dict':model.state_dict(),
+                'state_dict':base_model.state_dict(),
                 'fogpass1_state_dict':FogPassFilter1.state_dict(),
                 'fogpass2_state_dict':FogPassFilter2.state_dict(),
                 'train_iter':i_iter,

@@ -10,18 +10,18 @@ PRETRAINED_FOGPASS="/kaggle/input/fifo-pretrained/FogPassFilter_pretrained.pth"
 
 # WandB offline to avoid network prompts on Kaggle
 export WANDB_MODE=offline
-# Choose which GPU to use (Kaggle often gives GPU 0 as first T4)
-export CUDA_VISIBLE_DEVICES=0
+# Use both T4 GPUs on Kaggle
+export CUDA_VISIBLE_DEVICES=0,1
 
 python main.py \
   --modeltrain train \
   --file-name FIFO_freq_t4 \
   --restore-from "$PRETRAINED_SEG" \
   --restore-from-fogpass "$PRETRAINED_FOGPASS" \
-  --batch-size 1 \
+  --batch-size 2 \
   --iter-size 1 \
-  --accum-steps 2 \
-  --num-workers 2 \
+  --accum-steps 1 \
+  --num-workers 4 \
   --save-pred-every 2000 \
   --snapshot-dir /kaggle/working/snapshots/FIFO_model \
   --gpu 0
