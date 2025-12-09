@@ -81,6 +81,7 @@ def main():
 
     args = get_arguments()
     accum_steps = max(1, getattr(args, "accum_steps", 1))
+    iter_size = max(1, getattr(args, "iter_size", 1))
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
     random.seed(args.random_seed)
@@ -150,23 +151,23 @@ def main():
         os.makedirs(args.snapshot_dir)
 
     cwsf_pair_loader = data.DataLoader(Pairedcityscapes(args.data_dir, args.data_dir_cwsf, args.data_list, args.data_list_cwsf,
-                                        max_iters=args.num_steps * accum_steps * args.batch_size,
+                                        max_iters=args.num_steps * iter_size * args.batch_size,
                                         mean=IMG_MEAN, set=args.set), batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                                         pin_memory=True)
 
     rf_loader = data.DataLoader(foggyzurichDataSet(args.data_dir_rf, args.data_list_rf,
-                                            max_iters=args.num_steps * accum_steps * args.batch_size,
+                                            max_iters=args.num_steps * iter_size * args.batch_size,
                                             mean=IMG_MEAN, set=args.set),
                                             batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                                             pin_memory=True)
 
     cwsf_pair_loader_fogpass = data.DataLoader(Pairedcityscapes(args.data_dir, args.data_dir_cwsf, args.data_list, args.data_list_cwsf,
-                                                max_iters=args.num_steps * accum_steps * args.batch_size,
+                                                max_iters=args.num_steps * iter_size * args.batch_size,
                                                 mean=IMG_MEAN, set=args.set), batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                                                 pin_memory=True)
 
     rf_loader_fogpass = data.DataLoader(foggyzurichDataSet(args.data_dir_rf, args.data_list_rf,
-                                                    max_iters=args.num_steps * accum_steps * args.batch_size,
+                                                    max_iters=args.num_steps * iter_size * args.batch_size,
                                                     mean=IMG_MEAN, set=args.set), batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                                                     pin_memory=True)
 
@@ -181,16 +182,21 @@ def main():
     m = nn.Softmax(dim=1)
     log_m = nn.LogSoftmax(dim=1)    
 
+    accum_step = 0
+
     for i_iter in tqdm(range(start_iter, args.num_steps)):
         loss_seg_cw_value = 0
         loss_seg_sf_value = 0
         loss_fsm_value = 0
         loss_con_value = 0
 
-        for opt in opts:
-            opt.zero_grad()
+        if accum_step == 0:
+            for opt in opts:
+                opt.zero_grad()
+            FogPassFilter1_optimizer.zero_grad()
+            FogPassFilter2_optimizer.zero_grad()
 
-        for sub_i in range(accum_steps):
+        for sub_i in range(iter_size):
             # train fog-pass filtering module
             # freeze the parameters of segmentation network
 
@@ -286,7 +292,7 @@ def main():
                 wandb.log({f'layer{idx}/fpf loss': fog_pass_filter_loss}, step=i_iter)
                 wandb.log({f'layer{idx}/total fpf loss': total_fpf_loss}, step=i_iter)
 
-            total_fpf_loss.backward(retain_graph=False)
+            (total_fpf_loss / accum_steps).backward(retain_graph=False)
 
 
             if args.modeltrain=='train':
@@ -402,17 +408,17 @@ def main():
                     loss_fsm += layer_fsm_loss / args.batch_size
 
                 loss = loss_seg_sf + loss_seg_cw + args.lambda_fsm*loss_fsm + args.lambda_con*loss_con  
-                loss = loss / accum_steps
+                loss = loss / (iter_size * accum_steps)
                 loss.backward()
 
                 if loss_seg_cw != 0:
-                    loss_seg_cw_value += loss_seg_cw.data.cpu().numpy() / accum_steps
+                    loss_seg_cw_value += loss_seg_cw.data.cpu().numpy() / iter_size
                 if loss_seg_sf != 0:
-                    loss_seg_sf_value += loss_seg_sf.data.cpu().numpy() / accum_steps
+                    loss_seg_sf_value += loss_seg_sf.data.cpu().numpy() / iter_size
                 if loss_fsm != 0:
-                    loss_fsm_value += loss_fsm.data.cpu().numpy() / accum_steps
+                    loss_fsm_value += loss_fsm.data.cpu().numpy() / iter_size
                 if loss_con != 0:
-                    loss_con_value += loss_con.data.cpu().numpy() / accum_steps
+                    loss_con_value += loss_con.data.cpu().numpy() / iter_size
 
             
                 wandb.log({"fsm loss": args.lambda_fsm*loss_fsm_value}, step=i_iter)
@@ -421,8 +427,13 @@ def main():
                 wandb.log({'consistency loss':args.lambda_con*loss_con_value}, step=i_iter)
                 wandb.log({'total_loss': loss}, step=i_iter)           
 
-                for opt in opts:
-                    opt.step()
+        accum_step += 1
+
+        if accum_step >= accum_steps:
+            accum_step = 0
+
+            for opt in opts:
+                opt.step()
 
             FogPassFilter1_optimizer.step()
             FogPassFilter2_optimizer.step()
