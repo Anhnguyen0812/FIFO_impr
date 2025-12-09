@@ -10,8 +10,8 @@ PRETRAINED_FOGPASS="/kaggle/input/fifo-pretrained/FogPassFilter_pretrained.pth"
 
 # WandB offline to avoid network prompts on Kaggle
 export WANDB_MODE=offline
-# Use both T4 GPUs on Kaggle
-export CUDA_VISIBLE_DEVICES=0,1
+# Use single GPU (set P100 runtime in Kaggle; GPU id 0)
+export CUDA_VISIBLE_DEVICES=0
 
 python main.py \
   --modeltrain train \
