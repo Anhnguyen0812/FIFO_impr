@@ -20,7 +20,6 @@ from datetime import datetime
 
 from model.refinenetlw import rf_lw101
 from model.fogpassfilter import FogPassFilter_conv1, FogPassFilter_res1
-from model.boundary_head import BoundaryHead, generate_boundary_label
 from utils.losses import CrossEntropy2d
 from dataset.paired_cityscapes import Pairedcityscapes
 from dataset.Foggy_Zurich import foggyzurichDataSet
@@ -45,25 +44,15 @@ def gram_matrix(tensor):
     gram = torch.mm(tensor, tensor.t())
     return gram
 
-class FocalLoss(nn.Module):
-    """Focal Loss for handling class imbalance in boundary detection.
-    
-    Args:
-        alpha: Weighting factor in [0, 1] to balance positive/negative examples
-        gamma: Exponent of modulating factor (1 - p_t)^gamma
-    """
-    def __init__(self, alpha=0.25, gamma=2.0):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        
-    def forward(self, pred, target):
-        # pred: [B, 1, H, W] logits
-        # target: [B, 1, H, W] binary labels (0 or 1)
-        bce = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
-        pt = torch.exp(-bce)  # probability of correct class
-        focal = self.alpha * (1 - pt) ** self.gamma * bce
-        return focal.mean()
+def fft_log_mag(x):
+    """Log-magnitude of FFT for frequency consistency."""
+    ffted = torch.fft.rfft2(x, norm='ortho')
+    mag = torch.sqrt(ffted.real ** 2 + ffted.imag ** 2 + 1e-8)
+    return torch.log1p(mag)
+
+
+def frequency_consistency_loss(a, b):
+    return F.l1_loss(fft_log_mag(a), fft_log_mag(b))
 
 def setup_optimisers_and_schedulers(args, model):
     optimisers = get_optimisers(
@@ -143,7 +132,8 @@ def main():
     lr_fpf2 = 1e-3
 
     if args.modeltrain=='train':
-        lr_fpf1 = 5e-4
+        lr_fpf1 = args.fogpass_lr_ft
+        lr_fpf2 = args.fogpass_lr_ft
 
     FogPassFilter1 = FogPassFilter_conv1(2080)
     FogPassFilter1_optimizer = torch.optim.Adamax([p for p in FogPassFilter1.parameters() if p.requires_grad == True], lr=lr_fpf1)
@@ -152,22 +142,10 @@ def main():
     FogPassFilter2_optimizer = torch.optim.Adamax([p for p in FogPassFilter2.parameters() if p.requires_grad == True], lr=lr_fpf2)
     FogPassFilter2.cuda(args.gpu)
 
-    # Initialize Boundary Detection Head
-    # out1 (conv1): 64 channels, out2 (layer1): 256 channels
-    BoundaryHead_model = BoundaryHead(in_channels_low=64, in_channels_mid=256, out_channels=1)
-    BoundaryHead_model.train()
-    BoundaryHead_model.cuda(args.gpu)
-    BoundaryHead_optimizer = torch.optim.Adam(BoundaryHead_model.parameters(), lr=1e-3)
-    
-    # Boundary loss (Focal Loss for better handling of boundary/non-boundary imbalance)
-    boundary_criterion = FocalLoss(alpha=0.25, gamma=2.0)
-
     if args.restore_from_fogpass != RESTORE_FROM_fogpass:
         restore = torch.load(args.restore_from_fogpass, weights_only=False)
         FogPassFilter1.load_state_dict(restore['fogpass1_state_dict'])
         FogPassFilter2.load_state_dict(restore['fogpass2_state_dict'])
-        if 'boundary_state_dict' in restore:
-            BoundaryHead_model.load_state_dict(restore['boundary_state_dict'])
 
     fogpassfilter_loss = losses.ContrastiveLoss(
         pos_margin=0.1,
@@ -213,126 +191,141 @@ def main():
     m = nn.Softmax(dim=1)
     log_m = nn.LogSoftmax(dim=1)    
 
-    # Warmup for boundary loss to let segmentation stabilise first
-    boundary_warmup_iters = 3000
-    
     # Gradient accumulation counter
     accum_step = 0
 
     for i_iter in tqdm(range(start_iter, args.num_steps)): 
+        train_fogpass = i_iter >= args.fogpass_unfreeze_iter
+
+        if not train_fogpass:
+            for param in FogPassFilter1.parameters():
+                param.requires_grad = False
+            for param in FogPassFilter2.parameters():
+                param.requires_grad = False
+        else:
+            for param in FogPassFilter1.parameters():
+                param.requires_grad = True
+            for param in FogPassFilter2.parameters():
+                param.requires_grad = True
+            if i_iter == args.fogpass_unfreeze_iter:
+                for group in FogPassFilter1_optimizer.param_groups:
+                    group['lr'] = args.fogpass_lr_ft
+                for group in FogPassFilter2_optimizer.param_groups:
+                    group['lr'] = args.fogpass_lr_ft
+
         loss_seg_cw_value = 0
         loss_seg_sf_value = 0
         loss_fsm_value = 0
         loss_con_value = 0
-        loss_boundary_value = 0
+        loss_freq_value = 0
 
         # Zero gradients only at the start of accumulation cycle
         if accum_step == 0:
             for opt in opts:
                 opt.zero_grad()
-            if i_iter >= boundary_warmup_iters:
-                BoundaryHead_optimizer.zero_grad()
-            FogPassFilter1_optimizer.zero_grad()
-            FogPassFilter2_optimizer.zero_grad()
+            if train_fogpass:
+                FogPassFilter1_optimizer.zero_grad()
+                FogPassFilter2_optimizer.zero_grad()
 
         for sub_i in range(args.iter_size):
-            # train fog-pass filtering module
-            # freeze the parameters of segmentation network
-
-            model.eval()
-            for param in model.parameters():
-                param.requires_grad = False
-            for param in FogPassFilter1.parameters():
-                param.requires_grad = True
-            for param in FogPassFilter2.parameters():
-                param.requires_grad = True
-  
-            _, batch = cwsf_pair_loader_iter_fogpass.__next__()
-            sf_image, cw_image, label, size, sf_name, cw_name = batch
-            interp = nn.Upsample(size=(size[0][0],size[0][1]), mode='bilinear')
-            
-            _, batch_rf = rf_loader_iter_fogpass.__next__()
-            rf_img,rf_size, rf_name = batch_rf
-            img_rf = Variable(rf_img).cuda(args.gpu)
-            feature_rf0, feature_rf1, feature_rf2, feature_rf3, feature_rf4, feature_rf5 = model(img_rf) 
-
-            images = Variable(sf_image).cuda(args.gpu)
-            feature_sf0,feature_sf1,feature_sf2, feature_sf3,feature_sf4,feature_sf5 = model(images)
-
-            images_cw = Variable(cw_image).cuda(args.gpu)
-            feature_cw0, feature_cw1, feature_cw2, feature_cw3, feature_cw4, feature_cw5 = model(images_cw)
-
-            fsm_weights = {'layer0':0.5, 'layer1':0.5}
-            sf_features = {'layer0':feature_sf0, 'layer1':feature_sf1}                
-            cw_features = {'layer0':feature_cw0, 'layer1':feature_cw1}
-            rf_features = {'layer0':feature_rf0, 'layer1':feature_rf1}
-
             total_fpf_loss = 0
 
-            for idx, layer in enumerate(fsm_weights):
-                cw_feature = cw_features[layer]
-                sf_feature = sf_features[layer]    
-                rf_feature = rf_features[layer]      
-                fog_pass_filter_loss = 0 
+            if train_fogpass:
+                # train fog-pass filtering module
+                # freeze the parameters of segmentation network
+
+                model.eval()
+                for param in model.parameters():
+                    param.requires_grad = False
+                for param in FogPassFilter1.parameters():
+                    param.requires_grad = True
+                for param in FogPassFilter2.parameters():
+                    param.requires_grad = True
+  
+                _, batch = cwsf_pair_loader_iter_fogpass.__next__()
+                sf_image, cw_image, label, size, sf_name, cw_name = batch
+                interp = nn.Upsample(size=(size[0][0],size[0][1]), mode='bilinear')
                 
-                if idx == 0:
-                    fogpassfilter = FogPassFilter1
-                    fogpassfilter_optimizer = FogPassFilter1_optimizer
-                elif idx == 1:
-                    fogpassfilter = FogPassFilter2
-                    fogpassfilter_optimizer = FogPassFilter2_optimizer
+                _, batch_rf = rf_loader_iter_fogpass.__next__()
+                rf_img,rf_size, rf_name = batch_rf
+                img_rf = Variable(rf_img).cuda(args.gpu)
+                feature_rf0, feature_rf1, feature_rf2, feature_rf3, feature_rf4, feature_rf5 = model(img_rf) 
 
-                fogpassfilter.train()  
-                fogpassfilter_optimizer.zero_grad()
-                
-                sf_gram = [0]*args.batch_size
-                cw_gram = [0]*args.batch_size
-                rf_gram = [0]*args.batch_size 
-                vector_sf_gram = [0]*args.batch_size
-                vector_cw_gram = [0]*args.batch_size
-                vector_rf_gram  = [0]*args.batch_size
-                fog_factor_sf = [0]*args.batch_size
-                fog_factor_cw = [0]*args.batch_size
-                fog_factor_rf = [0]*args.batch_size
+                images = Variable(sf_image).cuda(args.gpu)
+                feature_sf0,feature_sf1,feature_sf2, feature_sf3,feature_sf4,feature_sf5 = model(images)
 
-                for batch_idx in range(args.batch_size):
-                    sf_gram[batch_idx] = gram_matrix(sf_feature[batch_idx])
-                    cw_gram[batch_idx] = gram_matrix(cw_feature[batch_idx])
-                    rf_gram[batch_idx] = gram_matrix(rf_feature[batch_idx])
+                images_cw = Variable(cw_image).cuda(args.gpu)
+                feature_cw0, feature_cw1, feature_cw2, feature_cw3, feature_cw4, feature_cw5 = model(images_cw)
 
-                    vector_sf_gram[batch_idx] = Variable(sf_gram[batch_idx][torch.triu(torch.ones(sf_gram[batch_idx].size()[0], sf_gram[batch_idx].size()[1])) == 1], requires_grad=True)
-                    vector_cw_gram[batch_idx] = Variable(cw_gram[batch_idx][torch.triu(torch.ones(cw_gram[batch_idx].size()[0], cw_gram[batch_idx].size()[1])) == 1], requires_grad=True)
-                    vector_rf_gram[batch_idx] = Variable(rf_gram[batch_idx][torch.triu(torch.ones(rf_gram[batch_idx].size()[0], rf_gram[batch_idx].size()[1])) == 1], requires_grad=True)
+                fsm_weights = {'layer0':0.5, 'layer1':0.5}
+                sf_features = {'layer0':feature_sf0, 'layer1':feature_sf1}                
+                cw_features = {'layer0':feature_cw0, 'layer1':feature_cw1}
+                rf_features = {'layer0':feature_rf0, 'layer1':feature_rf1}
 
-                    fog_factor_sf[batch_idx] = fogpassfilter(vector_sf_gram[batch_idx])
-                    fog_factor_cw[batch_idx] = fogpassfilter(vector_cw_gram[batch_idx])
-                    fog_factor_rf[batch_idx] = fogpassfilter(vector_rf_gram[batch_idx])                                                                                                                                                                                                
+                for idx, layer in enumerate(fsm_weights):
+                    cw_feature = cw_features[layer]
+                    sf_feature = sf_features[layer]    
+                    rf_feature = rf_features[layer]      
+                    fog_pass_filter_loss = 0 
+                    
+                    if idx == 0:
+                        fogpassfilter = FogPassFilter1
+                        fogpassfilter_optimizer = FogPassFilter1_optimizer
+                    elif idx == 1:
+                        fogpassfilter = FogPassFilter2
+                        fogpassfilter_optimizer = FogPassFilter2_optimizer
 
-                # Dynamically build fog_factor_embeddings based on actual batch size
-                fog_factor_list = []
-                fog_factor_labels_list = []
-                for batch_idx in range(args.batch_size):
-                    fog_factor_list.extend([
-                        torch.unsqueeze(fog_factor_sf[batch_idx], 0),
-                        torch.unsqueeze(fog_factor_cw[batch_idx], 0),
-                        torch.unsqueeze(fog_factor_rf[batch_idx], 0)
-                    ])
-                    fog_factor_labels_list.extend([0, 1, 2])
-                
-                fog_factor_embeddings = torch.cat(fog_factor_list, 0)
-                fog_factor_embeddings_norm = torch.norm(fog_factor_embeddings, p=2, dim=1).detach()
-                size_fog_factor = fog_factor_embeddings.size()
-                fog_factor_embeddings = fog_factor_embeddings.div(fog_factor_embeddings_norm.expand(size_fog_factor[1], args.batch_size * 3).t())
-                fog_factor_labels = torch.LongTensor(fog_factor_labels_list)
-                fog_pass_filter_loss = fogpassfilter_loss(fog_factor_embeddings,fog_factor_labels)
+                    fogpassfilter.train()  
+                    fogpassfilter_optimizer.zero_grad()
+                    
+                    sf_gram = [0]*args.batch_size
+                    cw_gram = [0]*args.batch_size
+                    rf_gram = [0]*args.batch_size 
+                    vector_sf_gram = [0]*args.batch_size
+                    vector_cw_gram = [0]*args.batch_size
+                    vector_rf_gram  = [0]*args.batch_size
+                    fog_factor_sf = [0]*args.batch_size
+                    fog_factor_cw = [0]*args.batch_size
+                    fog_factor_rf = [0]*args.batch_size
 
-                total_fpf_loss +=  fog_pass_filter_loss 
-              
-                wandb.log({f'layer{idx}/fpf loss': fog_pass_filter_loss}, step=i_iter)
-                wandb.log({f'layer{idx}/total fpf loss': total_fpf_loss}, step=i_iter)
+                    for batch_idx in range(args.batch_size):
+                        sf_gram[batch_idx] = gram_matrix(sf_feature[batch_idx])
+                        cw_gram[batch_idx] = gram_matrix(cw_feature[batch_idx])
+                        rf_gram[batch_idx] = gram_matrix(rf_feature[batch_idx])
 
-            # Scale fog-pass filter loss by accumulation steps
-            (total_fpf_loss / args.accum_steps).backward(retain_graph=False)
+                        vector_sf_gram[batch_idx] = Variable(sf_gram[batch_idx][torch.triu(torch.ones(sf_gram[batch_idx].size()[0], sf_gram[batch_idx].size()[1])) == 1], requires_grad=True)
+                        vector_cw_gram[batch_idx] = Variable(cw_gram[batch_idx][torch.triu(torch.ones(cw_gram[batch_idx].size()[0], cw_gram[batch_idx].size()[1])) == 1], requires_grad=True)
+                        vector_rf_gram[batch_idx] = Variable(rf_gram[batch_idx][torch.triu(torch.ones(rf_gram[batch_idx].size()[0], rf_gram[batch_idx].size()[1])) == 1], requires_grad=True)
+
+                        fog_factor_sf[batch_idx] = fogpassfilter(vector_sf_gram[batch_idx])
+                        fog_factor_cw[batch_idx] = fogpassfilter(vector_cw_gram[batch_idx])
+                        fog_factor_rf[batch_idx] = fogpassfilter(vector_rf_gram[batch_idx])                                                                                                                                                                                                
+
+                    # Dynamically build fog_factor_embeddings based on actual batch size
+                    fog_factor_list = []
+                    fog_factor_labels_list = []
+                    for batch_idx in range(args.batch_size):
+                        fog_factor_list.extend([
+                            torch.unsqueeze(fog_factor_sf[batch_idx], 0),
+                            torch.unsqueeze(fog_factor_cw[batch_idx], 0),
+                            torch.unsqueeze(fog_factor_rf[batch_idx], 0)
+                        ])
+                        fog_factor_labels_list.extend([0, 1, 2])
+                    
+                    fog_factor_embeddings = torch.cat(fog_factor_list, 0)
+                    fog_factor_embeddings_norm = torch.norm(fog_factor_embeddings, p=2, dim=1).detach()
+                    size_fog_factor = fog_factor_embeddings.size()
+                    fog_factor_embeddings = fog_factor_embeddings.div(fog_factor_embeddings_norm.expand(size_fog_factor[1], args.batch_size * 3).t())
+                    fog_factor_labels = torch.LongTensor(fog_factor_labels_list)
+                    fog_pass_filter_loss = fogpassfilter_loss(fog_factor_embeddings,fog_factor_labels)
+
+                    total_fpf_loss +=  fog_pass_filter_loss 
+                  
+                    wandb.log({f'layer{idx}/fpf loss': fog_pass_filter_loss}, step=i_iter)
+                    wandb.log({f'layer{idx}/total fpf loss': total_fpf_loss}, step=i_iter)
+
+                # Scale fog-pass filter loss by accumulation steps
+                (total_fpf_loss / args.accum_steps).backward(retain_graph=False)
 
 
             if args.modeltrain=='train':
@@ -369,6 +362,7 @@ def main():
                     fsm_weights = {'layer0':0.5, 'layer1':0.5}
                     sf_features = {'layer0':feature_sf0, 'layer1':feature_sf1}                
                     cw_features = {'layer0':feature_cw0, 'layer1':feature_cw1}
+                    loss_freq = frequency_consistency_loss(feature_sf5, feature_cw5)
 
                 if i_iter % 3 == 1:
                     _, batch_rf = rf_loader_iter.__next__()
@@ -384,6 +378,7 @@ def main():
                     rf_features = {'layer0':feature_rf0, 'layer1':feature_rf1}
                     sf_features = {'layer0':feature_sf0, 'layer1':feature_sf1}
                     fsm_weights = {'layer0':0.5, 'layer1':0.5}
+                    loss_freq = frequency_consistency_loss(feature_sf5, feature_rf5)
                 
                 if i_iter % 3 == 2:
                     _, batch_rf = rf_loader_iter.__next__()
@@ -399,6 +394,7 @@ def main():
                     rf_features = {'layer0':feature_rf0, 'layer1':feature_rf1}
                     cw_features = {'layer0':feature_cw0, 'layer1':feature_cw1}
                     fsm_weights = {'layer0':0.5, 'layer1':0.5}
+                    loss_freq = frequency_consistency_loss(feature_cw5, feature_rf5)
 
                 loss_fsm = 0
                 fog_pass_filter_loss = 0
@@ -447,60 +443,7 @@ def main():
 
                     loss_fsm += layer_fsm_loss / args.batch_size
 
-                # Boundary Detection Loss (Multi-task Learning)
-                loss_boundary = 0
-                boundary_weight = 0.0
-
-                # Adaptive boundary weight schedule
-                if i_iter < boundary_warmup_iters:
-                    boundary_weight = 0.0  # Warmup: no boundary loss
-                elif i_iter < 6000:
-                    boundary_weight = args.lambda_boundary  # Initial weight (0.01)
-                else:
-                    boundary_weight = min(args.lambda_boundary * 3, 0.03)  # Increase after 6000 (up to 0.03)
-
-                # Enable boundary loss only after warmup
-                if i_iter >= boundary_warmup_iters:
-                    BoundaryHead_model.train()
-
-                    # Generate boundary ground truth from segmentation labels
-                    label_tensor = label.cuda(args.gpu)  # [B, H, W]
-                    boundary_gt = generate_boundary_label(label_tensor)  # [B, 1, H, W]
-
-                    # Compute boundary loss with both SF and CW features + consistency
-                    if i_iter % 3 == 0:
-                        # Both SF and CW available: supervise both + add consistency
-                        boundary_pred_cw = BoundaryHead_model(feature_cw0, feature_cw1)
-                        boundary_pred_sf = BoundaryHead_model(feature_sf0, feature_sf1)
-                        
-                        boundary_gt_resized = F.interpolate(boundary_gt, size=boundary_pred_cw.shape[2:], mode='bilinear', align_corners=True)
-                        
-                        # GT loss: CW (weight 1.0) + SF (weight 0.5)
-                        loss_boundary_cw = boundary_criterion(boundary_pred_cw, boundary_gt_resized)
-                        loss_boundary_sf = boundary_criterion(boundary_pred_sf, boundary_gt_resized)
-                        
-                        # Consistency loss: SF boundary should match CW boundary (use CW as teacher)
-                        loss_boundary_consistency = F.mse_loss(
-                            torch.sigmoid(boundary_pred_sf),
-                            torch.sigmoid(boundary_pred_cw).detach()
-                        )
-                        
-                        # Combined boundary loss
-                        loss_boundary = loss_boundary_cw + 0.5 * loss_boundary_sf + 0.3 * loss_boundary_consistency
-                        
-                    elif i_iter % 3 == 1:
-                        # Only SF available
-                        boundary_pred_sf = BoundaryHead_model(feature_sf0, feature_sf1)
-                        boundary_gt_resized = F.interpolate(boundary_gt, size=boundary_pred_sf.shape[2:], mode='bilinear', align_corners=True)
-                        loss_boundary = 0.5 * boundary_criterion(boundary_pred_sf, boundary_gt_resized)
-                        
-                    elif i_iter % 3 == 2:
-                        # Only CW available
-                        boundary_pred_cw = BoundaryHead_model(feature_cw0, feature_cw1)
-                        boundary_gt_resized = F.interpolate(boundary_gt, size=boundary_pred_cw.shape[2:], mode='bilinear', align_corners=True)
-                        loss_boundary = boundary_criterion(boundary_pred_cw, boundary_gt_resized)
-
-                loss = loss_seg_sf + loss_seg_cw + args.lambda_fsm*loss_fsm + args.lambda_con*loss_con + boundary_weight*loss_boundary
+                loss = loss_seg_sf + loss_seg_cw + args.lambda_fsm*loss_fsm + args.lambda_con*loss_con + args.lambda_freq*loss_freq
                 # Scale loss by both iter_size and accumulation steps
                 loss = loss / (args.iter_size * args.accum_steps)
                 loss.backward()
@@ -513,15 +456,15 @@ def main():
                     loss_fsm_value += loss_fsm.data.cpu().numpy() / args.iter_size
                 if loss_con != 0:
                     loss_con_value += loss_con.data.cpu().numpy() / args.iter_size
-                if loss_boundary != 0:
-                    loss_boundary_value += loss_boundary.data.cpu().numpy() / args.iter_size
+                if loss_freq != 0:
+                    loss_freq_value += loss_freq.data.cpu().numpy() / args.iter_size
 
             
                 wandb.log({"fsm loss": args.lambda_fsm*loss_fsm_value}, step=i_iter)
                 wandb.log({'SF_loss_seg': loss_seg_sf_value}, step=i_iter)
                 wandb.log({'CW_loss_seg': loss_seg_cw_value}, step=i_iter)
                 wandb.log({'consistency loss':args.lambda_con*loss_con_value}, step=i_iter)
-                wandb.log({'boundary loss':boundary_weight*loss_boundary_value}, step=i_iter)
+                wandb.log({'frequency loss':args.lambda_freq*loss_freq_value}, step=i_iter)
                 wandb.log({'total_loss': loss}, step=i_iter)
         
         # Increment accumulation step counter
@@ -535,13 +478,10 @@ def main():
             if args.modeltrain == 'train':
                 for opt in opts:
                     opt.step()
-                
-                # Update boundary head only when it is active
-                if i_iter >= boundary_warmup_iters:
-                    BoundaryHead_optimizer.step()
 
-            FogPassFilter1_optimizer.step()
-            FogPassFilter2_optimizer.step()
+            if train_fogpass:
+                FogPassFilter1_optimizer.step()
+                FogPassFilter2_optimizer.step()
 
         if i_iter < 20000:
             save_pred_every = 5000
@@ -559,14 +499,13 @@ def main():
                 torch.save({'state_dict':model.state_dict(),
                 'fogpass1_state_dict':FogPassFilter1.state_dict(),
                 'fogpass2_state_dict':FogPassFilter2.state_dict(),
-                'boundary_state_dict':BoundaryHead_model.state_dict(),
                 'train_iter':i_iter,
                 'args':args
                 },osp.join(args.snapshot_dir, run_name)+'_fogpassfilter_'+str(i_iter)+'.pth')
 
         if i_iter % save_pred_every == 0 and i_iter != 0:
             print('taking snapshot ...')
-            print(f'Step {i_iter} - SF_loss: {loss_seg_sf_value:.4f}, CW_loss: {loss_seg_cw_value:.4f}, FSM_loss: {args.lambda_fsm*loss_fsm_value:.6f}, Consistency_loss: {args.lambda_con*loss_con_value:.6f}, Boundary_loss: {args.lambda_boundary*loss_boundary_value:.4f}')
+            print(f'Step {i_iter} - SF_loss: {loss_seg_sf_value:.4f}, CW_loss: {loss_seg_cw_value:.4f}, FSM_loss: {args.lambda_fsm*loss_fsm_value:.6f}, Consistency_loss: {args.lambda_con*loss_con_value:.6f}, Freq_loss: {args.lambda_freq*loss_freq_value:.6f}')
             save_dir = osp.join(f'./result/FIFO_model', args.file_name)
             
             if not os.path.exists(save_dir):
@@ -576,7 +515,6 @@ def main():
                 'state_dict':model.state_dict(),
                 'fogpass1_state_dict':FogPassFilter1.state_dict(),
                 'fogpass2_state_dict':FogPassFilter2.state_dict(),
-                'boundary_state_dict':BoundaryHead_model.state_dict(),
                 'train_iter':i_iter,
                 'args':args
             },osp.join(args.snapshot_dir, run_name)+'_FIFO'+str(i_iter)+'.pth')
