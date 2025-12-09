@@ -1,5 +1,5 @@
 #!/bin/bash
-# Train Stage 2 on Kaggle T4 (single GPU) with frequency loss and fog-pass fine-tuning.
+# Train Stage 2 on Kaggle (single GPU, P100 recommended) with frequency loss and fog-pass fine-tuning.
 # Fill in the two paths below before running.
 
 set -euo pipefail
@@ -18,10 +18,10 @@ python main.py \
   --file-name FIFO_freq_t4 \
   --restore-from "$PRETRAINED_SEG" \
   --restore-from-fogpass "$PRETRAINED_FOGPASS" \
-  --batch-size 2 \
+  --batch-size 1 \
   --iter-size 1 \
-  --accum-steps 1 \
-  --num-workers 4 \
+  --accum-steps 2 \
+  --num-workers 2 \
   --save-pred-every 2000 \
   --snapshot-dir /kaggle/working/snapshots/FIFO_model \
   --gpu 0

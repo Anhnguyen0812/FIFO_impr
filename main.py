@@ -122,13 +122,24 @@ def main():
         model.load_state_dict(restore['state_dict'])
         start_iter = 0
 
+    teacher_model = None
+    if args.restore_from_teacher:
+        teacher_ckpt = torch.load(args.restore_from_teacher, weights_only=False)
+        teacher_model = rf_lw101(num_classes=args.num_classes)
+        teacher_model.load_state_dict(teacher_ckpt['state_dict'])
+        teacher_model.eval()
+
     # Enable multi-GPU if available
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
+        if teacher_model is not None:
+            teacher_model = nn.DataParallel(teacher_model)
 
     model.train()
     model.cuda(args.gpu)
     base_model = model.module if isinstance(model, nn.DataParallel) else model
+    if teacher_model is not None:
+        teacher_model.cuda(args.gpu)
 
     lr_fpf1 = 1e-3 
     lr_fpf2 = 1e-3
@@ -218,8 +229,7 @@ def main():
         loss_seg_cw_value = 0
         loss_seg_sf_value = 0
         loss_fsm_value = 0
-        loss_con_value = 0
-        loss_freq_value = 0
+        loss_pl_value = 0
 
         # Zero gradients only at the start of accumulation cycle
         if accum_step == 0:
@@ -347,6 +357,8 @@ def main():
 
                 interp = nn.Upsample(size=(size[0][0],size[0][1]), mode='bilinear')
 
+                loss_pl = 0
+
                 if i_iter % 3 == 0:
                     images_sf = Variable(sf_image).cuda(args.gpu)
                     feature_sf0,feature_sf1,feature_sf2, feature_sf3,feature_sf4,feature_sf5 = model(images_sf)
@@ -381,6 +393,18 @@ def main():
                     sf_features = {'layer0':feature_sf0, 'layer1':feature_sf1}
                     fsm_weights = {'layer0':0.5, 'layer1':0.5}
                     loss_freq = frequency_consistency_loss(feature_sf5, feature_rf5)
+                    # Pseudo-label loss on RF images (teacher-based)
+                    loss_pl = 0
+                    if teacher_model is not None:
+                        with torch.no_grad():
+                            teacher_pred = teacher_model(img_rf)[-1]
+                            teacher_pred_up = interp(teacher_pred)
+                            teacher_prob = m(teacher_pred_up)
+                            conf, pseudo = torch.max(teacher_prob, dim=1)
+                            mask = conf >= args.pl_threshold
+                            pseudo_masked = pseudo.clone()
+                            pseudo_masked[~mask] = 255
+                        loss_pl = loss_calc(pred_sf5, pseudo_masked, args.gpu) if mask.any() else 0
                 
                 if i_iter % 3 == 2:
                     _, batch_rf = rf_loader_iter.__next__()
@@ -397,6 +421,18 @@ def main():
                     cw_features = {'layer0':feature_cw0, 'layer1':feature_cw1}
                     fsm_weights = {'layer0':0.5, 'layer1':0.5}
                     loss_freq = frequency_consistency_loss(feature_cw5, feature_rf5)
+                    # Pseudo-label loss on RF images (teacher-based)
+                    loss_pl = 0
+                    if teacher_model is not None:
+                        with torch.no_grad():
+                            teacher_pred = teacher_model(img_rf)[-1]
+                            teacher_pred_up = interp(teacher_pred)
+                            teacher_prob = m(teacher_pred_up)
+                            conf, pseudo = torch.max(teacher_prob, dim=1)
+                            mask = conf >= args.pl_threshold
+                            pseudo_masked = pseudo.clone()
+                            pseudo_masked[~mask] = 255
+                        loss_pl = loss_calc(pred_cw5, pseudo_masked, args.gpu) if mask.any() else 0
 
                 loss_fsm = 0
                 fog_pass_filter_loss = 0
@@ -445,7 +481,8 @@ def main():
 
                     loss_fsm += layer_fsm_loss / args.batch_size
 
-                loss = loss_seg_sf + loss_seg_cw + args.lambda_fsm*loss_fsm + args.lambda_con*loss_con + args.lambda_freq*loss_freq
+                loss_pl_term = loss_pl if 'loss_pl' in locals() else 0
+                loss = loss_seg_sf + loss_seg_cw + args.lambda_fsm*loss_fsm + args.lambda_con*loss_con + args.lambda_freq*loss_freq + args.lambda_pl*loss_pl_term
                 # Scale loss by both iter_size and accumulation steps
                 loss = loss / (args.iter_size * args.accum_steps)
                 loss.backward()
@@ -460,6 +497,8 @@ def main():
                     loss_con_value += loss_con.data.cpu().numpy() / args.iter_size
                 if loss_freq != 0:
                     loss_freq_value += loss_freq.data.cpu().numpy() / args.iter_size
+                if loss_pl_term != 0:
+                    loss_pl_value += (loss_pl_term.data.cpu().numpy() if hasattr(loss_pl_term, 'data') else 0) / args.iter_size
 
             
                 wandb.log({"fsm loss": args.lambda_fsm*loss_fsm_value}, step=i_iter)
@@ -467,6 +506,7 @@ def main():
                 wandb.log({'CW_loss_seg': loss_seg_cw_value}, step=i_iter)
                 wandb.log({'consistency loss':args.lambda_con*loss_con_value}, step=i_iter)
                 wandb.log({'frequency loss':args.lambda_freq*loss_freq_value}, step=i_iter)
+                wandb.log({'pseudo loss':args.lambda_pl*loss_pl_value}, step=i_iter)
                 wandb.log({'total_loss': loss}, step=i_iter)
         
         # Increment accumulation step counter
@@ -507,7 +547,7 @@ def main():
 
         if i_iter % save_pred_every == 0 and i_iter != 0:
             print('taking snapshot ...')
-            print(f'Step {i_iter} - SF_loss: {loss_seg_sf_value:.4f}, CW_loss: {loss_seg_cw_value:.4f}, FSM_loss: {args.lambda_fsm*loss_fsm_value:.6f}, Consistency_loss: {args.lambda_con*loss_con_value:.6f}, Freq_loss: {args.lambda_freq*loss_freq_value:.6f}')
+            print(f'Step {i_iter} - SF_loss: {loss_seg_sf_value:.4f}, CW_loss: {loss_seg_cw_value:.4f}, FSM_loss: {args.lambda_fsm*loss_fsm_value:.6f}, Consistency_loss: {args.lambda_con*loss_con_value:.6f}, Freq_loss: {args.lambda_freq*loss_freq_value:.6f}, PL_loss: {args.lambda_pl*loss_pl_value:.6f}')
             save_dir = osp.join(f'./result/FIFO_model', args.file_name)
             
             if not os.path.exists(save_dir):

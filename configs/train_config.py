@@ -26,6 +26,8 @@ SNAPSHOT_DIR = f'./snapshots/FIFO_model'
 LAMBDA_FREQ = 0.001
 FOGPASS_UNFREEZE_ITER = 4000
 FOGPASS_LR_FT = 1e-4
+LAMBDA_PL = 0.5
+PL_THRESHOLD = 0.7
 
 SET = 'train'
 
@@ -60,6 +62,9 @@ def get_arguments():
     parser.add_argument("--lambda-freq", type=float, default=LAMBDA_FREQ, help="Weight for frequency consistency loss")
     parser.add_argument("--fogpass-unfreeze-iter", type=int, default=FOGPASS_UNFREEZE_ITER, help="Iteration to start fine-tuning fog-pass filters")
     parser.add_argument("--fogpass-lr-ft", type=float, default=FOGPASS_LR_FT, help="Learning rate for fog-pass fine-tuning in Stage 2")
+    parser.add_argument("--lambda-pl", type=float, default=LAMBDA_PL, help="Weight for pseudo-label loss on unlabeled foggy data")
+    parser.add_argument("--pl-threshold", type=float, default=PL_THRESHOLD, help="Confidence threshold for pseudo-labels")
+    parser.add_argument("--restore-from-teacher", type=str, default='', help="Optional teacher checkpoint for pseudo-labeling")
     parser.add_argument("--accum-steps", type=int, default=1, help="Number of gradient accumulation steps (effective batch size = batch_size * accum_steps)")
     parser.add_argument("--file-name", type=str, required=True)
     parser.add_argument("--modeltrain", type=str, required=True)
