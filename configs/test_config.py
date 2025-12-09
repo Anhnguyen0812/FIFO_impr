@@ -2,7 +2,20 @@
 import argparse
 import os
 import numpy as np
-IMG_MEAN = np.array((104.00698793, 116.66876762, 122.67891434), dtype=np.float32)
+
+# ResNet-101 normalization (BGR format, subtract mean only)
+IMG_MEAN_RESNET = np.array((104.00698793, 116.66876762, 122.67891434), dtype=np.float32)
+
+# SegFormer normalization config (RGB format, mean & std from ImageNet)
+# Compatible with SegFormer pre-trained on Cityscapes
+IMG_NORM_SEGFORMER = dict(
+    mean=[123.675, 116.28, 103.53],   # ImageNet mean (RGB order)
+    std=[58.395, 57.12, 57.375],      # ImageNet std (RGB order)
+    to_rgb=True                        # CRITICAL: Keep RGB, don't convert to BGR
+)
+
+# Backward compatibility
+IMG_MEAN = IMG_MEAN_RESNET
 MODEL = 'RefineNetNew'
 DATA_DIRECTORY ='/root/data'
 DATA_CITY_PATH = '/workspace/FIFO_impr/dataset/cityscapes_list/clear_lindau.txt'

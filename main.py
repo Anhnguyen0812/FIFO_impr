@@ -33,7 +33,18 @@ from pytorch_metric_learning import losses
 from pytorch_metric_learning.distances import CosineSimilarity
 from pytorch_metric_learning.reducers import MeanReducer
 
-IMG_MEAN = np.array((104.00698793, 116.66876762, 122.67891434), dtype=np.float32)
+# ResNet-101 normalization (BGR format, subtract mean only)
+IMG_MEAN_RESNET = np.array((104.00698793, 116.66876762, 122.67891434), dtype=np.float32)
+
+# SegFormer normalization config (RGB format, mean & std from ImageNet)
+IMG_NORM_SEGFORMER = dict(
+    mean=[123.675, 116.28, 103.53],   # ImageNet mean (RGB order)
+    std=[58.395, 57.12, 57.375],      # ImageNet std (RGB order)
+    to_rgb=True                        # CRITICAL: Keep RGB, don't convert to BGR
+)
+
+# Backward compatibility
+IMG_MEAN = IMG_MEAN_RESNET
 RESTORE_FROM = 'without_pretraining'
 RESTORE_FROM_fogpass = 'without_pretraining'
 
@@ -200,8 +211,58 @@ def main():
 
     if args.restore_from_fogpass != RESTORE_FROM_fogpass:
         restore = torch.load(args.restore_from_fogpass, weights_only=False)
-        FogPassFilter1.load_state_dict(restore['fogpass1_state_dict'])
-        FogPassFilter2.load_state_dict(restore['fogpass2_state_dict'])
+        
+        # Check preprocessing compatibility
+        fogpass_trained_with_segformer = False
+        if 'args' in restore:
+            fogpass_trained_with_segformer = getattr(restore['args'], 'use_segformer', False)
+        
+        preprocessing_mismatch = (fogpass_trained_with_segformer != use_segformer)
+        
+        if preprocessing_mismatch:
+            print("\n" + "="*70)
+            print("⚠️  WARNING: PREPROCESSING MISMATCH DETECTED!")
+            print("="*70)
+            print(f"  FogPassFilter was trained with: {'SegFormer (RGB)' if fogpass_trained_with_segformer else 'ResNet (BGR)'}")
+            print(f"  Current training uses:          {'SegFormer (RGB)' if use_segformer else 'ResNet (BGR)'}")
+            print("\n  Gram matrices will be COMPLETELY DIFFERENT!")
+            print("\n  Options:")
+            print("    1. Use --retrain-fogpass to retrain from scratch (RECOMMENDED)")
+            print("    2. Use --adapt-fogpass to fine-tune with new preprocessing")
+            print("    3. Continue anyway (NOT RECOMMENDED - will have poor performance)")
+            print("="*70 + "\n")
+            
+            if args.retrain_fogpass:
+                print("✓ --retrain-fogpass enabled: Training FogPassFilter from scratch")
+                print("  (Pretrained weights will be ignored)\n")
+                # Don't load fogpass weights
+            elif args.adapt_fogpass:
+                print("✓ --adapt-fogpass enabled: Loading weights but will fine-tune")
+                FogPassFilter1.load_state_dict(restore['fogpass1_state_dict'])
+                FogPassFilter2.load_state_dict(restore['fogpass2_state_dict'])
+                # Reduce LR for adaptation (10x lower for fine-tuning)
+                lr_fpf1_adapted = lr_fpf1 * 0.1
+                lr_fpf2_adapted = lr_fpf2 * 0.1
+                print(f"  • FogPassFilter1 LR: {lr_fpf1:.0e} → {lr_fpf1_adapted:.0e} (10x lower)")
+                print(f"  • FogPassFilter2 LR: {lr_fpf2:.0e} → {lr_fpf2_adapted:.0e} (10x lower)")
+                print("  • Strategy: Fine-tune to adapt Gram matrices from BGR→RGB\n")
+                # Recreate optimizers with adapted LR
+                FogPassFilter1_optimizer = torch.optim.Adamax(
+                    [p for p in FogPassFilter1.parameters() if p.requires_grad == True], lr=lr_fpf1_adapted)
+                FogPassFilter2_optimizer = torch.optim.Adamax(
+                    [p for p in FogPassFilter2.parameters() if p.requires_grad == True], lr=lr_fpf2_adapted)
+            else:
+                print("⚠️  Loading anyway - expect POOR PERFORMANCE!\n")
+                FogPassFilter1.load_state_dict(restore['fogpass1_state_dict'])
+                FogPassFilter2.load_state_dict(restore['fogpass2_state_dict'])
+        else:
+            print("✓ Preprocessing compatible - loading FogPassFilter weights")
+            FogPassFilter1.load_state_dict(restore['fogpass1_state_dict'])
+            FogPassFilter2.load_state_dict(restore['fogpass2_state_dict'])
+            print(f"  • FogPassFilter1 LR: {lr_fpf1:.0e}")
+            print(f"  • FogPassFilter2 LR: {lr_fpf2:.0e}")
+        
+        # Always try to load DualEncoder (preprocessing independent)
         if 'dual_encoder_state_dict' in restore:
             DualEncoder_model.load_state_dict(restore['dual_encoder_state_dict'])
             print('✓ Dual Encoder weights restored')
@@ -220,25 +281,54 @@ def main():
     if not os.path.exists(args.snapshot_dir):
         os.makedirs(args.snapshot_dir)
 
+    # Select preprocessing based on model type
+    if use_segformer:
+        print("\n" + "="*70)
+        print("Training with SegFormer preprocessing:")
+        print(f"  • Format: RGB (no BGR conversion)")
+        print(f"  • Mean: {IMG_NORM_SEGFORMER['mean']}")
+        print(f"  • Std: {IMG_NORM_SEGFORMER['std']}")
+        print("\n⚠️  IMPORTANT: FogPassFilter learns from Gram matrices")
+        print("  RGB ≠ BGR → Different Gram matrices!")
+        print("  If using pretrained BGR FogPassFilter, use --retrain-fogpass")
+        print("="*70 + "\n")
+        dataset_kwargs = {
+            'use_segformer_norm': True,
+            'norm_cfg': IMG_NORM_SEGFORMER
+        }
+    else:
+        print("\n" + "="*70)
+        print("Training with ResNet preprocessing:")
+        print(f"  • Format: BGR (RGB→BGR conversion)")
+        print(f"  • Mean subtract: {IMG_MEAN}")
+        print("="*70 + "\n")
+        dataset_kwargs = {
+            'mean': IMG_MEAN,
+            'use_segformer_norm': False
+        }
+
     cwsf_pair_loader = data.DataLoader(Pairedcityscapes(args.data_dir, args.data_dir_cwsf, args.data_list, args.data_list_cwsf,
                                         max_iters=args.num_steps * args.iter_size * args.batch_size,
-                                        mean=IMG_MEAN, set=args.set), batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+                                        set=args.set, **dataset_kwargs), 
+                                        batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                                         pin_memory=True)
 
     rf_loader = data.DataLoader(foggyzurichDataSet(args.data_dir_rf, args.data_list_rf,
                                             max_iters=args.num_steps * args.iter_size * args.batch_size,
-                                            mean=IMG_MEAN, set=args.set),
+                                            set=args.set, **dataset_kwargs),
                                             batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                                             pin_memory=True)
 
     cwsf_pair_loader_fogpass = data.DataLoader(Pairedcityscapes(args.data_dir, args.data_dir_cwsf, args.data_list, args.data_list_cwsf,
                                                 max_iters=args.num_steps * args.iter_size * args.batch_size,
-                                                mean=IMG_MEAN, set=args.set), batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+                                                set=args.set, **dataset_kwargs), 
+                                                batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                                                 pin_memory=True)
 
     rf_loader_fogpass = data.DataLoader(foggyzurichDataSet(args.data_dir_rf, args.data_list_rf,
                                                     max_iters=args.num_steps * args.iter_size * args.batch_size,
-                                                    mean=IMG_MEAN, set=args.set), batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+                                                    set=args.set, **dataset_kwargs), 
+                                                    batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                                                     pin_memory=True)
 
     rf_loader_iter = enumerate(rf_loader)
@@ -325,7 +415,7 @@ def main():
                     fogpassfilter_optimizer = FogPassFilter2_optimizer
 
                 fogpassfilter.train()  
-                fogpassfilter_optimizer.zero_grad()
+                # Note: zero_grad already called at start of accumulation cycle
                 
                 sf_gram = [0]*args.batch_size
                 cw_gram = [0]*args.batch_size

@@ -11,7 +11,15 @@ from PIL import Image
 
 class cityscapesDataSet(data.Dataset):
 
-    def __init__(self, root, list_path, max_iters=None, crop_size=(321, 321), mean=(128, 128, 128), scale=True, mirror=True, ignore_label=255, set='val'):
+    def __init__(self, root, list_path, max_iters=None, crop_size=(321, 321), mean=(128, 128, 128), 
+                 scale=True, mirror=True, ignore_label=255, set='val', 
+                 use_segformer_norm=False, norm_cfg=None):
+        """
+        Args:
+            use_segformer_norm: If True, use SegFormer normalization (RGB + mean/std normalize)
+                               If False, use ResNet normalization (BGR + subtract mean)
+            norm_cfg: Dict with 'mean', 'std', 'to_rgb' for SegFormer normalization
+        """
         self.root = root
         self.list_path = list_path
         self.crop_size = crop_size
@@ -19,6 +27,15 @@ class cityscapesDataSet(data.Dataset):
         self.ignore_label = ignore_label
         self.mean = mean
         self.is_mirror = mirror
+        self.use_segformer_norm = use_segformer_norm
+        self.norm_cfg = norm_cfg
+        if use_segformer_norm and norm_cfg is None:
+            # Default SegFormer normalization
+            self.norm_cfg = dict(
+                mean=[123.675, 116.28, 103.53],
+                std=[58.395, 57.12, 57.375],
+                to_rgb=True
+            )
         self.img_ids = [i_id.strip() for i_id in open(list_path)]
         if not max_iters==None:
             self.img_ids = self.img_ids * int(np.ceil(float(max_iters) / len(self.img_ids)))
@@ -46,8 +63,25 @@ class cityscapesDataSet(data.Dataset):
         image = np.asarray(image, np.float32)
 
         size = image.shape
-        image = image[:, :, ::-1]  # change to BGR
-        image -= self.mean
+        
+        # Apply normalization based on model type
+        if self.use_segformer_norm:
+            # SegFormer: Keep RGB, normalize with mean and std
+            if self.norm_cfg['to_rgb']:
+                # Already RGB, no need to convert
+                pass
+            else:
+                image = image[:, :, ::-1]  # Convert to BGR if needed
+            
+            # Normalize: (image - mean) / std
+            mean = np.array(self.norm_cfg['mean'], dtype=np.float32)
+            std = np.array(self.norm_cfg['std'], dtype=np.float32)
+            image = (image - mean) / std
+        else:
+            # ResNet: Convert to BGR, subtract mean only
+            image = image[:, :, ::-1]  # change to BGR
+            image -= self.mean
+        
         image = image.transpose((2, 0, 1))
 
         return image.copy(), np.array(size), name
