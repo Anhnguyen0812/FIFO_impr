@@ -48,6 +48,7 @@ def get_arguments():
     parser.add_argument("--random-seed", type=int, default=RANDOM_SEED)
     parser.add_argument("--restore-from", type=str, default=RESTORE_FROM)
     parser.add_argument("--restore-from-fogpass", type=str, default=RESTORE_FROM_fogpass)
+    parser.add_argument("--accum-steps", type=int, default=1, help="Number of gradient accumulation steps (effective batch size = batch_size * accum_steps)")
     parser.add_argument("--save-pred-every", type=int, default=SAVE_PRED_EVERY)
     parser.add_argument("--snapshot-dir", type=str, default=SNAPSHOT_DIR)
     parser.add_argument("--gpu", type=int, default=0)
